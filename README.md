@@ -23,7 +23,7 @@ Roost Xplorer is a file manager written in Python. It follows your GNOME/libadwa
 - Grid view with image thumbnails, and a list view with sortable columns. The list hides columns that don't fit, so file names stay readable in narrow panes.
 - **Zoom** the grid icons with <kbd>Ctrl</kbd>+scroll or <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> (<kbd>Ctrl</kbd>+<kbd>0</kbd> resets).
 - **Quick preview** (<kbd>Space</kbd>): a large preview of an image, PDF or text file. Use <kbd>←</kbd> / <kbd>→</kbd> to step through the folder, <kbd>Page Up</kbd> / <kbd>Page Down</kbd> for PDF pages, <kbd>Enter</kbd> to open the file, <kbd>Space</kbd> or <kbd>Esc</kbd> to close.
-- Tabs, a breadcrumb path bar (click it, or press <kbd>Ctrl</kbd>+<kbd>L</kbd>, to type a path), back/forward history, and a sidebar you can resize or hide.
+- Tabs you can **drag out into their own window** (or right-click a tab: *Move to New Window*, *Duplicate Tab*, *Close Other Tabs*), a breadcrumb path bar (click it, or press <kbd>Ctrl</kbd>+<kbd>L</kbd>, to type a path), back/forward history, and a sidebar you can resize or hide.
 - **Split view** (<kbd>F3</kbd>): two folders side by side. Drag files between them, or send the selection across with <kbd>F5</kbd> (copy) and <kbd>F6</kbd> (move).
 - Remembers your view, sort order, window size and open tabs (including split panes) between launches.
 
@@ -51,7 +51,7 @@ Roost Xplorer is a file manager written in Python. It follows your GNOME/libadwa
 - Drag and drop everywhere: onto folders, into the other pane, or onto sidebar entries. Hold <kbd>Ctrl</kbd> to copy instead of move.
 
 **Sidebar**
-- Places, **Favorites** (right-click a folder, or press <kbd>Ctrl</kbd>+<kbd>D</kbd>), Trash and your disks.
+- Places, **Favorites**, Trash and your disks. Add a favorite by right-clicking a folder, pressing <kbd>Ctrl</kbd>+<kbd>D</kbd>, or dragging a folder onto the *Favorites* heading, and **drag favorites up and down** to put them in your order.
 - Disks show a **usage bar** that turns red when they are nearly full. Hover for the exact free space.
 - USB sticks, SD cards and network shares get an **eject button** right in the sidebar.
 - Give any disk or favorite a friendlier **label** with a right-click. This only changes the name shown in the sidebar, never the disk itself.
@@ -62,6 +62,7 @@ Roost Xplorer is a file manager written in Python. It follows your GNOME/libadwa
 - **New File** (next to New Folder) and **Copy Path** (copies the full path of the selection, or of the current folder).
 
 **Everyday touches**
+- Soft hover and selection fades, a short crossfade when switching views, and progress bars that glide.
 - Right-click menus with Open With, Open in Terminal, Properties (folder sizes included) and more.
 - Trash with **Restore** (to the original location) and **Empty Trash**.
 - Backspace, <kbd>Alt</kbd>+<kbd>↑</kbd> or a double-click on empty space goes up a folder.

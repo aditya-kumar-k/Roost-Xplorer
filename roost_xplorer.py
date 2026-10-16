@@ -2039,7 +2039,7 @@ class TabContainer(Gtk.Box):
 
 # ------------------------------------------------------------------ window
 class Window(Adw.ApplicationWindow):
-    def __init__(self, app, start, restore=False):
+    def __init__(self, app, start, restore=False, empty=False):
         cfg = load_config()
         win = cfg.get("window") if isinstance(cfg.get("window"), dict) else {}
         super().__init__(application=app, default_width=max(500, as_int(win.get("width"), 1120)),
@@ -2056,6 +2056,8 @@ class Window(Adw.ApplicationWindow):
         self.sort_key = sort.get("key", "name") if sort.get("key") in ("name", "modified", "size", "type") else "name"
         self.sort_desc = bool(sort.get("desc", False))
         self._session_timer = None
+        self.save_session = not empty  # windows made by pulling a tab out don't overwrite the saved session
+        self._menu_page = None
         self.cut_files = []
         self._menu_height = {}
         self.jobs = []
@@ -2082,7 +2084,9 @@ class Window(Adw.ApplicationWindow):
         self.lookup_action("sort-desc").set_state(GLib.Variant("b", self.sort_desc))
         self.sidebar_btn.set_active(bool(cfg.get("sidebar_visible", True)))
         self.update_view_button()
-        if restore:
+        if empty:
+            pass  # a tab is about to be moved in
+        elif restore:
             self._restore_session(start)
         else:
             self.new_tab(start)
@@ -2130,6 +2134,8 @@ class Window(Adw.ApplicationWindow):
 
     def schedule_session_save(self):
         """Save the open tabs a moment after the last change, so a crash or kill doesn't lose them."""
+        if not self.save_session:
+            return
         if self._session_timer is not None:
             GLib.source_remove(self._session_timer)
         self._session_timer = GLib.timeout_add(800, self._save_session_now)
@@ -2154,6 +2160,15 @@ class Window(Adw.ApplicationWindow):
         self.tabview = Adw.TabView()
         self.tabview.connect("notify::selected-page", lambda *a: self._on_tab_changed())
         self.tabview.connect("notify::n-pages", self._on_pages_changed)
+        self.tabview.connect("create-window", self._on_create_window)   # a tab was dragged out of the tab bar
+        self.tabview.connect("page-attached", self._on_page_attached)   # a tab arrived (new, or from another window)
+        self.tabview.connect("setup-menu", self._on_tab_menu)
+        tab_menu = Gio.Menu()
+        tab_menu.append("Move to New Window", "win.tab-new-window")
+        tab_menu.append("Duplicate Tab", "win.tab-duplicate")
+        tab_menu.append("Close Other Tabs", "win.tab-close-others")
+        tab_menu.append("Close Tab", "win.tab-close")
+        self.tabview.set_menu_model(tab_menu)
         self.tabbar = Adw.TabBar(view=self.tabview, autohide=True)
         newtab = Gtk.Button(icon_name="tab-new-symbolic", css_classes=["flat"], tooltip_text="New Tab (Ctrl+T)")
         newtab.connect("clicked", lambda *a: self.new_tab(self.tab().file))
@@ -2285,6 +2300,8 @@ class Window(Adw.ApplicationWindow):
         self.set_content(self.split)
 
     def _save_config(self, *a):
+        if not self.save_session:
+            return False
         data = {"sidebar_visible": self.sidebar_btn.get_active()}
         if self.sidebar_btn.get_active():
             data["sidebar_width"] = self.split.get_position()
@@ -2349,6 +2366,10 @@ class Window(Adw.ApplicationWindow):
         add("zoom-reset", lambda: self.zoom(0), ["<Ctrl>0", "<Ctrl>KP_0"])
         add("new-file", self.new_file, ["<Ctrl><Alt>N"])
         add("copy-path", self.copy_path, ["<Ctrl><Shift>C"])
+        add("tab-new-window", self.tab_new_window)
+        add("tab-duplicate", self.tab_duplicate)
+        add("tab-close-others", self.tab_close_others)
+        add("tab-close", lambda: self.tabview.close_page(self._menu_target()))
         add("compress", self.compress)
         add("extract", self.extract)
         add("preview", self.preview)
@@ -2918,6 +2939,52 @@ class Window(Adw.ApplicationWindow):
         cont.refresh_title()
         self.tabview.set_selected_page(cont.page)
         self.schedule_session_save()
+
+    def _menu_target(self):
+        return self._menu_page or self.tabview.get_selected_page()
+
+    def _on_tab_menu(self, tabview, page):
+        self._menu_page = page
+        many = tabview.get_n_pages() > 1
+        self.acts["tab-new-window"].set_enabled(many)
+        self.acts["tab-close-others"].set_enabled(many)
+
+    def _new_empty_window(self):
+        win = Window(self.get_application(), Gio.File.new_for_path(GLib.get_home_dir()), empty=True)
+        win.set_default_size(max(600, self.get_width()), max(400, self.get_height()))
+        win.present()
+        return win
+
+    def _on_create_window(self, tabview):
+        """The user dragged a tab out of the tab bar: give it a window of its own."""
+        return self._new_empty_window().tabview
+
+    def _on_page_attached(self, tabview, page, position):
+        """A tab (and the panes in it) now belongs to this window. Point them here, wherever they came from."""
+        cont = page.get_child()
+        if isinstance(cont, TabContainer):
+            cont.win, cont.page = self, page
+            for pane in cont.panes:
+                pane.win = self
+            cont.refresh_title()
+            self.schedule_session_save()
+            if tabview.get_selected_page() is page:
+                self._on_tab_changed()
+
+    def tab_new_window(self):
+        page = self._menu_target()
+        if page is not None and self.tabview.get_n_pages() > 1:
+            self.tabview.transfer_page(page, self._new_empty_window().tabview, 0)
+
+    def tab_duplicate(self):
+        page = self._menu_target()
+        if page is not None:
+            self.new_tab(page.get_child().active.file)
+
+    def tab_close_others(self):
+        page = self._menu_target()
+        if page is not None:
+            self.tabview.close_other_pages(page)
 
     def _on_pages_changed(self, *a):
         if self.tabview.get_n_pages() == 0:
