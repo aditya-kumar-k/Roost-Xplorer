@@ -7,11 +7,14 @@ import fnmatch
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import threading
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 import gi
@@ -679,6 +682,245 @@ def restore_from_trash(job, wanted):
         job.done += 1
     job.undo = {"kind": "trash", "paths": restored} if restored else None
     job.message = f"Restored {plural(len(restored))}"
+
+
+# ---------------------------------------------------------------- archives
+ARCHIVE_FORMATS = {"zip": ".zip", "tar.gz": ".tar.gz", "tar.xz": ".tar.xz"}
+TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst")
+EXTERNAL_SUFFIXES = (".7z", ".rar", ".iso", ".cab", ".arj", ".lzh")
+
+
+def external_extractor():
+    """The 7-Zip command line tool, if installed: it opens 7z, rar and many other formats."""
+    return shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+
+
+def archive_kind(name):
+    low = name.lower()
+    if low.endswith(".zip"):
+        return "zip"
+    if low.endswith(TAR_SUFFIXES):
+        return "tar"
+    if low.endswith(EXTERNAL_SUFFIXES) and external_extractor():
+        return "external"
+    return None
+
+
+def archive_stem(name):
+    low = name.lower()
+    for suffix in sorted((".zip",) + TAR_SUFFIXES + EXTERNAL_SUFFIXES, key=len, reverse=True):
+        if low.endswith(suffix):
+            return name[: -len(suffix)] or name
+    return name
+
+
+class _ProgressReader:
+    """Wraps a file being read and reports how much has been read to a job (and honours Cancel)."""
+
+    def __init__(self, fileobj, job):
+        self.f, self.job = fileobj, job
+
+    def read(self, n=-1):
+        self.job.check()
+        data = self.f.read(CHUNK if n is None or n < 0 else n)
+        self.job.done += len(data)
+        return data
+
+
+def collect_entries(files):
+    """Everything to put in an archive as (path, name inside the archive, kind); symlinks are kept as links."""
+    entries = []
+    for f in files:
+        base = f.get_path()
+        parent = os.path.dirname(base)
+        if os.path.islink(base):
+            entries.append((base, os.path.basename(base), "link"))
+        elif not os.path.isdir(base):
+            if stat.S_ISREG(os.lstat(base).st_mode):
+                entries.append((base, os.path.basename(base), "file"))
+            continue
+        else:
+            for root, dirs, names in os.walk(base, followlinks=False):
+                rel = os.path.relpath(root, parent)
+                entries.append((root, rel, "dir"))
+                for d in list(dirs):  # os.walk lists links to folders among the folders but does not enter them
+                    full = os.path.join(root, d)
+                    if os.path.islink(full):
+                        entries.append((full, os.path.join(rel, d), "link"))
+                        dirs.remove(d)
+                for n in names:
+                    full = os.path.join(root, n)
+                    if os.path.islink(full):
+                        entries.append((full, os.path.join(rel, n), "link"))
+                    elif stat.S_ISREG(os.lstat(full).st_mode):
+                        entries.append((full, os.path.join(rel, n), "file"))
+    return entries
+
+
+def _write_zip(job, dest, entries):
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as zf:
+        for path, arc, kind in entries:
+            job.check()
+            job.status = f"Adding {os.path.basename(path)}"
+            if kind == "dir":
+                zf.writestr(zipfile.ZipInfo.from_file(path, arc), b"")
+            elif kind == "link":
+                info = zipfile.ZipInfo(arc)
+                info.create_system = 3
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                zf.writestr(info, os.readlink(path))
+            else:
+                info = zipfile.ZipInfo.from_file(path, arc)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                with open(path, "rb") as src, zf.open(info, "w", force_zip64=info.file_size > (1 << 31) - 1) as out:
+                    while chunk := src.read(CHUNK):
+                        out.write(chunk)
+                        job.done += len(chunk)
+                        job.check()
+
+
+def _write_tar(job, dest, entries, mode):
+    with tarfile.open(dest, mode) as tar:
+        for path, arc, kind in entries:
+            job.check()
+            job.status = f"Adding {os.path.basename(path)}"
+            info = tar.gettarinfo(path, arc)
+            if info is None:
+                continue
+            info.uid = info.gid = 0  # don't put your user name inside archives you may share
+            info.uname = info.gname = ""
+            if info.isreg():
+                with open(path, "rb") as f:
+                    tar.addfile(info, _ProgressReader(f, job))
+            else:
+                tar.addfile(info)
+
+
+def compress_job(job, files, dest_path, fmt):
+    entries = collect_entries(files)
+    job.unit = "bytes"
+    job.total = sum(os.lstat(p).st_size for p, _a, k in entries if k == "file") or 1
+    try:
+        if fmt == "zip":
+            _write_zip(job, dest_path, entries)
+        else:
+            _write_tar(job, dest_path, entries, "w:gz" if fmt == "tar.gz" else "w:xz")
+    except BaseException:
+        quiet_delete(Gio.File.new_for_path(dest_path))  # never leave a half-written archive
+        raise
+    job.undo = {"kind": "copy", "created": [Gio.File.new_for_path(dest_path)], "replaced": []}
+    job.message = f"Created {os.path.basename(dest_path)}"
+
+
+def _inside(base, path):
+    base = os.path.realpath(base)
+    path = os.path.realpath(path)
+    return path == base or path.startswith(base + os.sep)
+
+
+def _extract_zip(job, path, dest):
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+            job.total += sum(i.file_size for i in infos) or 1
+            skipped = 0
+            for info in infos:
+                job.check()
+                target = os.path.join(dest, info.filename)
+                if not _inside(dest, target):
+                    skipped += 1  # a "../" or absolute path trying to escape the folder
+                    continue
+                mode = info.external_attr >> 16
+                if stat.S_ISLNK(mode):
+                    link = zf.read(info).decode("utf-8", "replace")
+                    if _inside(dest, os.path.join(os.path.dirname(target), link)):
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        os.symlink(link, target)
+                    else:
+                        skipped += 1
+                elif info.is_dir():
+                    os.makedirs(target, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with zf.open(info) as src, open(target, "wb") as out:
+                        while chunk := src.read(CHUNK):
+                            out.write(chunk)
+                            job.done += len(chunk)
+                            job.check()
+                    if mode & 0o777:
+                        os.chmod(target, mode & 0o777)
+                    try:
+                        ts = time.mktime(info.date_time + (0, 0, -1))
+                        os.utime(target, (ts, ts))
+                    except (OverflowError, ValueError):
+                        pass
+            return skipped
+    except RuntimeError as e:
+        if "password" in str(e).lower() or "encrypted" in str(e).lower():
+            raise RuntimeError("This archive is password protected.") from e
+        raise
+    except zipfile.BadZipFile as e:
+        raise RuntimeError("This is not a valid zip file, or it is damaged.") from e
+
+
+def _extract_tar(job, path, dest):
+    skipped = 0
+    job.total += os.path.getsize(path) or 1
+    try:
+        with open(path, "rb") as raw:
+            with tarfile.open(fileobj=_ProgressReader(raw, job), mode="r|*") as tar:
+                for member in tar:
+                    job.check()
+                    try:
+                        tar.extract(member, dest, filter="data")  # refuses paths and links that escape the folder
+                    except tarfile.FilterError:
+                        skipped += 1
+    except tarfile.ReadError as e:
+        raise RuntimeError("This archive is damaged or in a format that is not supported.") from e
+    return skipped
+
+
+def _extract_external(job, path, dest):
+    proc = subprocess.Popen([external_extractor(), "x", "-y", f"-o{dest}", "--", path],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    while proc.poll() is None:
+        if job.cancellable.is_cancelled():
+            proc.terminate()
+            proc.wait()
+            raise Cancelled()
+        time.sleep(0.1)
+    if proc.returncode != 0:
+        detail = (proc.stderr.read() or b"").decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(detail[-1] if detail else "The archive could not be extracted.")
+    return 0
+
+
+def extract_job(job, archives):
+    job.unit = "bytes"
+    created, skipped = [], 0
+    for f in archives:
+        job.check()
+        name, parent = f.get_basename(), f.get_parent()
+        job.status = f"Extracting {name}"
+        # extract beside the archive into a scratch folder first, then decide what to call the result
+        tmp = tempfile.mkdtemp(prefix=".roost-extract-", dir=parent.get_path())
+        try:
+            kind = archive_kind(name)
+            skipped += {"zip": _extract_zip, "tar": _extract_tar, "external": _extract_external}[kind](job, f.get_path(), tmp)
+            entries = os.listdir(tmp)
+            if len(entries) == 1:  # the archive already has one top-level item: don't wrap it in another folder
+                src = os.path.join(tmp, entries[0])
+                target = unique_dest(parent, entries[0], os.path.isdir(src) and not os.path.islink(src)).get_path()
+            else:
+                src = tmp
+                target = unique_dest(parent, archive_stem(name) or "extracted", True).get_path()
+            os.rename(src, target)
+            created.append(Gio.File.new_for_path(target))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    if created:
+        job.undo = {"kind": "copy", "created": created, "replaced": []}
+    job.message = f"Extracted {plural(len(created), 'archive')}" + (f" ({skipped} unsafe item{'s' if skipped != 1 else ''} skipped)" if skipped else "")
 
 
 def undo_job(job, entry):
@@ -1728,6 +1970,7 @@ class Window(Adw.ApplicationWindow):
             self.maximize()
         self.show_hidden = bool(cfg.get("show_hidden", False))
         self.deep_search = bool(cfg.get("search_deep", True))
+        self.compress_format = cfg.get("compress_format") if cfg.get("compress_format") in ARCHIVE_FORMATS else "zip"
         self.view_mode = cfg.get("view", "grid") if cfg.get("view") in ("grid", "list") else "grid"
         sort = cfg.get("sort") if isinstance(cfg.get("sort"), dict) else {}
         self.sort_key = sort.get("key", "name") if sort.get("key") in ("name", "modified", "size", "type") else "name"
@@ -1818,7 +2061,7 @@ class Window(Adw.ApplicationWindow):
         return False
 
     def save_prefs(self):
-        save_config({"view": self.view_mode, "show_hidden": self.show_hidden, "search_deep": self.deep_search,
+        save_config({"view": self.view_mode, "show_hidden": self.show_hidden, "search_deep": self.deep_search, "compress_format": self.compress_format,
                      "sort": {"key": self.sort_key, "desc": self.sort_desc}})
 
     # ---- UI construction
@@ -2015,6 +2258,8 @@ class Window(Adw.ApplicationWindow):
         add("side-rename", self._side_rename)
         add("side-reset", self._side_reset)
         add("side-unmount", self._side_unmount)
+        add("compress", self.compress)
+        add("extract", self.extract)
         add("preview", self.preview)
         add("show-in-folder", self.show_in_folder)
         add("toggle-hidden", lambda: self.lookup_action("show-hidden").activate(None))
@@ -2071,6 +2316,10 @@ class Window(Adw.ApplicationWindow):
         opens.append_item(hidden_when_disabled("Open in Terminal", "win.terminal"))
         item.append_section(None, opens)
         item.append_section(None, section([("Cut", "win.cut"), ("Copy", "win.copy")]))
+        archives = Gio.Menu()
+        archives.append("Compress…", "win.compress")
+        archives.append_item(hidden_when_disabled("Extract Here", "win.extract"))
+        item.append_section(None, archives)
         item.append_section(None, section([("Rename…", "win.rename"), ("Move to Trash", "win.trash")]))
         panes = Gio.Menu()
         panes.append_item(hidden_when_disabled("Copy to Other Pane", "win.copy-other"))
@@ -2607,6 +2856,63 @@ class Window(Adw.ApplicationWindow):
         self.preview()
         return True
 
+    def compress(self):
+        tab = self.tab()
+        files = tab.selected_files()
+        if not files or not tab.file.get_path():
+            return
+        if len(files) == 1:
+            first = files[0]
+            stem = first.get_basename() if file_is_dir(first) else (os.path.splitext(first.get_basename())[0] or first.get_basename())
+        else:
+            stem = "Archive"
+        formats = list(ARCHIVE_FORMATS)
+        folder = tab.file
+
+        def with_extension(name, fmt):
+            for ext in ARCHIVE_FORMATS.values():
+                if name.lower().endswith(ext):
+                    name = name[: -len(ext)]
+            return name + ARCHIVE_FORMATS[fmt]
+
+        d = Adw.AlertDialog(heading=f"Compress {plural(len(files))}")
+        entry = Gtk.Entry(text=with_extension(stem, self.compress_format), hexpand=True, activates_default=True)
+        choice = Gtk.DropDown.new_from_strings(formats)
+        choice.set_selected(formats.index(self.compress_format))
+        choice.connect("notify::selected", lambda *a: entry.set_text(with_extension(entry.get_text(), formats[choice.get_selected()])))
+        row = Gtk.Box(spacing=8)
+        row.append(entry)
+        row.append(choice)
+        d.set_extra_child(row)
+        d.add_response("cancel", "Cancel")
+        d.add_response("ok", "Compress")
+        d.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+        d.set_default_response("ok")
+        d.set_close_response("cancel")
+
+        def on_response(dlg, response):
+            name = entry.get_text().strip()
+            if response != "ok" or not name or "/" in name:
+                if response == "ok" and "/" in name:
+                    self.toast("Names can't contain “/”")
+                return
+            fmt = formats[choice.get_selected()]
+            self.compress_format = fmt
+            self.save_prefs()
+            dest = unique_dest(folder, with_extension(name, fmt), False).get_path()
+            self.run_job(Job(f"Compressing {plural(len(files))}"), lambda job: compress_job(job, files, dest, fmt))
+
+        d.connect("response", on_response)
+        d.present(self)
+        entry.grab_focus()
+        entry.select_region(0, len(entry.get_text()) - len(ARCHIVE_FORMATS[self.compress_format]))
+
+    def extract(self):
+        archives = [f for f, i in zip(self.tab().selected_files(), self.tab().selected_infos())
+                    if archive_kind(i.get_display_name())]
+        if archives:
+            self.run_job(Job(f"Extracting {plural(len(archives), 'archive')}"), lambda job: extract_job(job, archives))
+
     def show_in_folder(self):
         tab = self.tab()
         infos = tab.selected_infos()
@@ -2671,6 +2977,10 @@ class Window(Adw.ApplicationWindow):
         trash = tab.file.get_uri_scheme() == "trash"
         self.acts["open"].set_enabled(n > 0)
         self.acts["preview"].set_enabled(n > 0 and info_file(infos[0]).get_path() is not None)
+        writable_here = tab.file.get_path() is not None and not trash
+        self.acts["compress"].set_enabled(n > 0 and writable_here and not tab.searching)
+        self.acts["extract"].set_enabled(n > 0 and writable_here and all(
+            not is_dir(i) and archive_kind(i.get_display_name()) for i in infos))
         self.acts["show-in-folder"].set_enabled(tab.searching and n == 1)
         self.acts["open-tab"].set_enabled(any(is_dir(i) for i in infos))
         self.acts["open-with"].set_enabled(n == 1 and not is_dir(infos[0]))
