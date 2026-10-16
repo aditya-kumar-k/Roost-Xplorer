@@ -2021,7 +2021,7 @@ class Window(Adw.ApplicationWindow):
         cfg = load_config()
         win = cfg.get("window") if isinstance(cfg.get("window"), dict) else {}
         super().__init__(application=app, default_width=max(500, as_int(win.get("width"), 1120)),
-                         default_height=max(350, as_int(win.get("height"), 720)), title="Files")
+                         default_height=max(350, as_int(win.get("height"), 720)), title="Roost Xplorer")
         if win.get("maximized"):
             self.maximize()
         self.show_hidden = bool(cfg.get("show_hidden", False))
@@ -2831,7 +2831,7 @@ class Window(Adw.ApplicationWindow):
         self.schedule_session_save()
         if tab is not self.tab():
             return
-        self.set_title(display_name(tab.file))
+        self.set_title(f"{display_name(tab.file)} — Roost Xplorer")  # the taskbar shows this
         if not tab.query_text and self.search_entry.get_text():
             self.search_entry.set_text("")  # navigating away from a search clears the search box
         self._build_crumbs(tab.file)
