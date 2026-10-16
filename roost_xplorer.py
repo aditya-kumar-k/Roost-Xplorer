@@ -88,7 +88,10 @@ columnview row:selected, listview row:selected, .navigation-sidebar row:selected
   color: #fff;
 }
 .navigation-sidebar row:selected image { color: @accent_color; }
-.navigation-sidebar row.drop-hover {
+.navigation-sidebar row.drop-line-before { box-shadow: inset 0 2px 0 @accent_color; }
+.navigation-sidebar row.drop-line-after { box-shadow: inset 0 -2px 0 @accent_color; }
+.navigation-sidebar row.dragging { opacity: 0.45; }
+.navigation-sidebar row .drop-hover, .navigation-sidebar row.drop-hover, .navigation-sidebar .drop-hover {
   background-color: alpha(@accent_bg_color, 0.25);
   box-shadow: inset 0 0 0 1px @accent_bg_color;
 }
@@ -369,6 +372,7 @@ SEARCH_LIMIT = 5000           # stop a search after this many results
 SEARCH_BATCH = 12             # results handed to the window at a time: small, so the window never stalls
 TEXT_PREVIEW_LIMIT = 200_000   # bytes of a text file shown in the quick preview
 IMAGE_PREVIEW_MAX = 2400       # longest side, in pixels, of an image preview
+FAV_DRAG_PREFIX = "roost-favorite:"   # marks a favorite being dragged to a new place in the list
 ZOOM_STEPS = (40, 56, 72, 96, 128, 160, 200)   # icon sizes in the grid view (72 is the default)
 CHUNK = 4 * 1024 * 1024        # how much is copied between progress updates
 SYNC_EVERY = 16 * 1024 * 1024  # flush to a *different* drive this often, so progress reflects real writes
@@ -2249,12 +2253,18 @@ class Window(Adw.ApplicationWindow):
         self.side_list.connect("row-activated", self._on_side_activated)
         # Drops are handled by the list itself, which works out the row under the pointer. (Drop targets
         # on the individual rows never receive the drag.)
+        # One drop target takes both kinds of drag: files (move/copy them, or add folders as favorites) and a
+        # favorite being dragged to a new place. (Two separate targets on the list fought over the drop.)
         drop = Gtk.DropTarget.new(Gdk.FileList.__gtype__, DND_ACTIONS)
-        drop.connect("motion", self._side_drop_motion)
-        drop.connect("leave", lambda *a: self._side_drop_highlight(None))
-        drop.connect("drop", self._side_drop)
+        drop.set_gtypes([Gdk.FileList.__gtype__, GObject.TYPE_STRING])
+        drop.set_preload(True)  # so we can look at what is being dragged while it hovers
+        drop.connect("motion", self._side_motion)
+        drop.connect("leave", lambda *a: (self._side_drop_highlight(None), self._fav_mark(None, False)))
+        drop.connect("drop", self._side_drop_any)
         self.side_list.add_controller(drop)
         self._drop_row = None
+        self._drop_header = None
+        self._fav_mark_row = None
         side = Adw.ToolbarView()
         brand = Gtk.Box(spacing=8)
         logo = LOGO
@@ -2551,6 +2561,13 @@ class Window(Adw.ApplicationWindow):
         click = Gtk.GestureClick(button=3)
         click.connect("pressed", self._on_side_menu, row)
         row.add_controller(click)
+        if fav and file is not None:
+            drag = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+            drag.connect("prepare", lambda src, x, y, uri=file.get_uri():
+                         Gdk.ContentProvider.new_for_value(FAV_DRAG_PREFIX + uri))
+            drag.connect("drag-begin", lambda src, d, r=row: r.add_css_class("dragging"))
+            drag.connect("drag-end", lambda src, d, delete, r=row: r.remove_css_class("dragging"))
+            row.add_controller(drag)
         self.side_list.append(row)
 
     def _on_side_menu(self, gesture, n, x, y, row):
@@ -2591,27 +2608,120 @@ class Window(Adw.ApplicationWindow):
         row = self.side_list.get_row_at_y(int(y))
         return row if row is not None and row.loc is not None else None
 
-    def _side_drop_highlight(self, row):
-        if row is self._drop_row:
-            return
-        if self._drop_row is not None:
-            self._drop_row.remove_css_class("drop-hover")
-        self._drop_row = row
-        if row is not None:
-            row.add_css_class("drop-hover")
+    def _over_favorites_heading(self, y):
+        """The widget (heading, or the hint row when there are no favorites yet) that adds a favorite when dropped on."""
+        for row in iter_children(self.side_list):
+            if not isinstance(row, Gtk.ListBoxRow) or getattr(row, "header_text", None) != "Favorites":
+                continue
+            if not row.fav:  # the "right-click a folder…" hint shown while the list is empty
+                ok, b = row.compute_bounds(self.side_list)
+                if ok and b.get_y() <= y <= b.get_y() + b.get_height():
+                    return row
+            header = row.get_header()
+            if header is not None:
+                ok, b = header.compute_bounds(self.side_list)
+                if ok and b.get_y() <= y <= b.get_y() + b.get_height():
+                    return header
+        return None
+
+    def _side_drop_highlight(self, row, header=None):
+        if row is not self._drop_row:
+            if self._drop_row is not None:
+                self._drop_row.remove_css_class("drop-hover")
+            self._drop_row = row
+            if row is not None:
+                row.add_css_class("drop-hover")
+        if header is not self._drop_header:
+            if self._drop_header is not None:
+                self._drop_header.remove_css_class("drop-hover")
+            self._drop_header = header
+            if header is not None:
+                header.add_css_class("drop-hover")
+
+    def _side_motion(self, target, x, y):
+        value = target.get_value()
+        if isinstance(value, str):
+            self._side_drop_highlight(None)
+            return self._fav_reorder_motion(target, x, y)
+        self._fav_mark(None, False)
+        return self._side_drop_motion(target, x, y)
+
+    def _side_drop_any(self, target, value, x, y):
+        if isinstance(value, str):
+            return self._fav_reorder_drop(target, value, x, y)
+        return self._side_drop(target, value, x, y)
 
     def _side_drop_motion(self, target, x, y):
         row = self._side_drop_row(y)
-        self._side_drop_highlight(row)
-        return DND_ACTIONS if row is not None else 0
+        if row is not None:
+            self._side_drop_highlight(row)
+            return DND_ACTIONS
+        heading = self._over_favorites_heading(y)
+        self._side_drop_highlight(None, heading)
+        return DND_ACTIONS if heading is not None else 0  # accept both copy and move, or a plain drag is refused
 
     def _side_drop(self, target, value, x, y):
         row = self._side_drop_row(y)
+        heading = self._over_favorites_heading(y) if row is None else None
         self._side_drop_highlight(None)
-        if row is None:
+        if row is not None:
+            return self.drop_files(value.get_files(), row.loc, copy=ctrl_held(target))
+        if heading is not None:
+            folders = [f for f in value.get_files() if file_is_dir(f)]
+            if not folders:
+                self.toast("Only folders can be added to Favorites")
+                return False
+            self.add_favorites(folders)
+            return True
+        return False
+
+    # ---- reordering favorites by dragging
+    def _fav_slot(self, y):
+        """Where a dragged favorite would land: (index among favorites, row to draw the line at, line goes below it)."""
+        rows = [r for r in iter_children(self.side_list) if isinstance(r, Gtk.ListBoxRow) and r.fav]
+        if not rows:
+            return None
+        first, last = rows[0].compute_bounds(self.side_list)[1], rows[-1].compute_bounds(self.side_list)[1]
+        if y < first.get_y() - 14 or y > last.get_y() + last.get_height() + 14:
+            return None
+        for i, r in enumerate(rows):
+            b = r.compute_bounds(self.side_list)[1]
+            if y < b.get_y() + b.get_height() / 2:
+                return i, r, False
+        return len(rows), rows[-1], True
+
+    def _fav_mark(self, row, below):
+        if self._fav_mark_row is not None:
+            self._fav_mark_row.remove_css_class("drop-line-before")
+            self._fav_mark_row.remove_css_class("drop-line-after")
+        self._fav_mark_row = row
+        if row is not None:
+            row.add_css_class("drop-line-after" if below else "drop-line-before")
+
+    @staticmethod
+    def _dragged_favorite(value):
+        return value[len(FAV_DRAG_PREFIX):] if isinstance(value, str) and value.startswith(FAV_DRAG_PREFIX) else None
+
+    def _fav_reorder_motion(self, target, x, y):
+        slot = self._fav_slot(y) if self._dragged_favorite(target.get_value()) else None
+        self._fav_mark(slot[1] if slot else None, slot[2] if slot else False)
+        return Gdk.DragAction.MOVE if slot else 0
+
+    def _fav_reorder_drop(self, target, value, x, y):
+        uri = self._dragged_favorite(value)
+        slot = self._fav_slot(y)
+        self._fav_mark(None, False)
+        if uri is None or slot is None or uri not in self.favorites:
             return False
-        ctrl = ctrl_held(target)
-        return self.drop_files(value.get_files(), row.loc, copy=ctrl)
+        index = slot[0]
+        old = self.favorites.index(uri)
+        self.favorites.remove(uri)
+        if old < index:
+            index -= 1  # everything after the old spot moved up by one
+        self.favorites.insert(index, uri)
+        save_config({"favorites": self.favorites})
+        self.rebuild_sidebar()
+        return True
 
     def _side_open(self):
         row = self._ctx_row
