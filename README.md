@@ -21,12 +21,18 @@ Roost Xplorer is a file manager written in Python. It follows your GNOME/libadwa
 
 **Browsing**
 - Grid view with image thumbnails, and a list view with sortable columns. The list hides columns that don't fit, so file names stay readable in narrow panes.
+- **Zoom** the grid icons with <kbd>Ctrl</kbd>+scroll or <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> (<kbd>Ctrl</kbd>+<kbd>0</kbd> resets).
+- **Quick preview** (<kbd>Space</kbd>): a large preview of an image, PDF or text file. Use <kbd>←</kbd> / <kbd>→</kbd> to step through the folder, <kbd>Page Up</kbd> / <kbd>Page Down</kbd> for PDF pages, <kbd>Enter</kbd> to open the file, <kbd>Space</kbd> or <kbd>Esc</kbd> to close.
 - Tabs, a breadcrumb path bar (click it, or press <kbd>Ctrl</kbd>+<kbd>L</kbd>, to type a path), back/forward history, and a sidebar you can resize or hide.
 - **Split view** (<kbd>F3</kbd>): two folders side by side. Drag files between them, or send the selection across with <kbd>F5</kbd> (copy) and <kbd>F6</kbd> (move).
 - Remembers your view, sort order, window size and open tabs (including split panes) between launches.
 
 <p align="center">
   <img src="docs/screenshots/split.png" width="760" alt="Split view with two folders side by side">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/preview.png" width="640" alt="Quick preview of an image, opened with the Space bar">
 </p>
 
 **Search**
@@ -47,8 +53,13 @@ Roost Xplorer is a file manager written in Python. It follows your GNOME/libadwa
 **Sidebar**
 - Places, **Favorites** (right-click a folder, or press <kbd>Ctrl</kbd>+<kbd>D</kbd>), Trash and your disks.
 - Disks show a **usage bar** that turns red when they are nearly full. Hover for the exact free space.
+- USB sticks, SD cards and network shares get an **eject button** right in the sidebar.
 - Give any disk or favorite a friendlier **label** with a right-click. This only changes the name shown in the sidebar, never the disk itself.
 - Mount and unmount disks from the right-click menu (the system asks for your password when it needs to).
+
+**Files and archives**
+- **Compress** the selection to `zip`, `tar.gz` or `tar.xz` (with progress and cancel), and **Extract Here** for zip and tar archives. With the 7-Zip tool installed it also opens `7z`, `rar` and more. Extraction skips anything that tries to write outside the folder, and an archive with a single top-level folder isn't wrapped in another one.
+- **New File** (next to New Folder) and **Copy Path** (copies the full path of the selection, or of the current folder).
 
 **Everyday touches**
 - Right-click menus with Open With, Open in Terminal, Properties (folder sizes included) and more.
@@ -73,6 +84,8 @@ That means Fedora 40+, Ubuntu 24.04+, Debian 13+, Arch, and openSUSE Tumbleweed 
 | Ubuntu / Debian | `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1` |
 | Arch / Manjaro | `sudo pacman -S python-gobject gtk4 libadwaita` |
 | openSUSE | `sudo zypper install python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 libadwaita` |
+
+**Optional extras:** `poppler-utils` (PDF previews) and `p7zip` / `7zip` (opening `7z` and `rar` archives). Everything else works without them.
 
 SVG icons also need `librsvg` (it is already installed on nearly every desktop; on Ubuntu/Debian the package is `librsvg2-common`).
 
@@ -152,15 +165,18 @@ Then delete the cloned folder if you like.
 | Up one folder | <kbd>Alt</kbd>+<kbd>↑</kbd> or <kbd>Backspace</kbd> |
 | Home folder | <kbd>Alt</kbd>+<kbd>Home</kbd> |
 | Open | <kbd>Ctrl</kbd>+<kbd>O</kbd> or <kbd>Enter</kbd> |
+| Quick preview | <kbd>Space</kbd> |
 | Cut / copy / paste | <kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd> |
 | Rename | <kbd>F2</kbd> |
 | Move to Trash | <kbd>Delete</kbd> |
-| New folder | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> |
+| New folder / new file | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> / <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> |
+| Copy the path | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> |
 | Select all | <kbd>Ctrl</kbd>+<kbd>A</kbd> |
 | Undo | <kbd>Ctrl</kbd>+<kbd>Z</kbd> |
 | Add or remove the current folder as a favorite | <kbd>Ctrl</kbd>+<kbd>D</kbd> |
 | Show hidden files | <kbd>Ctrl</kbd>+<kbd>H</kbd> |
 | Grid view / list view | <kbd>Ctrl</kbd>+<kbd>1</kbd> / <kbd>Ctrl</kbd>+<kbd>2</kbd> |
+| Bigger / smaller / normal icons | <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd> (or <kbd>Ctrl</kbd>+scroll) |
 | Show or hide the sidebar | <kbd>F9</kbd> |
 | Split view on/off | <kbd>F3</kbd> |
 | Switch between panes | <kbd>F4</kbd> |
@@ -177,12 +193,13 @@ If you used an earlier build of this app, your old settings are copied over auto
 - **"Roost Xplorer needs Python 3.12 ... GTK 4.12 ... libadwaita 1.5"** – your system is too old or the packages are missing. See [Install](#install).
 - **The icon is missing in the app menu** – log out and back in once, or run `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`.
 - **Mounting a disk shows "Not authorized"** – the system needs your password for internal disks. Make sure a polkit authentication agent is running (every full desktop session has one).
+- **PDF previews say "install poppler"** – install the `poppler-utils` package.
 - **Open in Terminal does nothing** – it uses the first terminal it finds (Konsole, Ptyxis, GNOME Terminal, Kitty, Alacritty, xterm, and a few others). Install one of them.
 
 ## Known limitations
 
 - Search inside subfolders works for local folders (not network locations or the Trash) and stops after 5,000 results.
-- No previews, archive handling or icon zoom yet.
+- Previews cover images, PDFs (first pages) and text; there is no audio or video playback. Archives you create are `zip`, `tar.gz` or `tar.xz`.
 - Tested mainly on Fedora KDE Plasma under Wayland. Reports from other desktops and distributions are very welcome.
 
 ## Contributing

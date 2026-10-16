@@ -101,3 +101,7 @@ case ":$PATH:" in
      warn "  The app-menu entry works regardless." ;;
 esac
 [ "$SET_DEFAULT" = 1 ] || echo "  To also make it the default folder opener, run:  ./install.sh --set-default"
+missing=""
+command -v pdftoppm >/dev/null 2>&1 || missing="$missing PDF previews (package: poppler-utils)"
+command -v 7z >/dev/null 2>&1 || command -v 7zz >/dev/null 2>&1 || command -v 7za >/dev/null 2>&1 || missing="$missing${missing:+;} opening 7z and rar archives (package: p7zip or 7zip)"
+[ -z "$missing" ] || echo "  Optional extras you could install later: $missing."

@@ -102,6 +102,8 @@ columnview row:selected, listview row:selected, .navigation-sidebar row:selected
 .pane-active { border-top: 2px solid @accent_bg_color; }
 .pane-inactive { border-top: 2px solid transparent; }
 .pane-inactive .status-bar, .pane-inactive .pane-title { opacity: 0.45; }
+.eject-button { min-width: 26px; min-height: 26px; padding: 0; margin: 0; }
+.eject-button:hover { color: @accent_color; }
 progressbar.disk-usage trough { min-height: 4px; border-radius: 2px; background-color: alpha(white, 0.14); }
 progressbar.disk-usage progress { min-height: 4px; border-radius: 2px; background-color: @accent_bg_color; }
 progressbar.disk-usage.full progress { background-color: #e5484d; }
@@ -143,6 +145,19 @@ TYPE_DESC = {}
 
 
 # ----------------------------------------------------------------- helpers
+def mount_is_removable(mount):
+    """USB sticks, SD cards, other external media and network shares get an eject button; internal disks don't."""
+    try:
+        if mount.can_eject():
+            return True
+        drive = mount.get_drive()
+        if drive is not None:
+            return bool(drive.is_removable())
+        return mount.get_volume() is None and mount.can_unmount()  # network and virtual mounts
+    except (GLib.Error, AttributeError):
+        return False
+
+
 def disk_key(obj, root=None):
     """A stable id for a disk, so a custom label survives re-mounting and changing mount points."""
     uuid = None
@@ -227,11 +242,20 @@ def display_name(file):
         return file.get_basename() or file.get_uri()
 
 
+def split_extension(name):
+    """('photo', '.jpg'), but also ('backup', '.tar.gz') so numbering goes before the whole extension."""
+    low = name.lower()
+    for compound in (".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst"):
+        if low.endswith(compound) and len(name) > len(compound):
+            return name[: -len(compound)], name[-len(compound):]
+    return os.path.splitext(name)
+
+
 def unique_dest(dest_dir, name, directory):
     target = dest_dir.get_child(name)
     if not target.query_exists(None):
         return target
-    stem, ext = (name, "") if directory else os.path.splitext(name)
+    stem, ext = (name, "") if directory else split_extension(name)
     i = 1
     while True:
         target = dest_dir.get_child(f"{stem} ({i}){ext}")
@@ -327,6 +351,7 @@ SEARCH_LIMIT = 5000           # stop a search after this many results
 SEARCH_BATCH = 12             # results handed to the window at a time: small, so the window never stalls
 TEXT_PREVIEW_LIMIT = 200_000   # bytes of a text file shown in the quick preview
 IMAGE_PREVIEW_MAX = 2400       # longest side, in pixels, of an image preview
+ZOOM_STEPS = (40, 56, 72, 96, 128, 160, 200)   # icon sizes in the grid view (72 is the default)
 CHUNK = 4 * 1024 * 1024        # how much is copied between progress updates
 SYNC_EVERY = 16 * 1024 * 1024  # flush to a *different* drive this often, so progress reflects real writes
 
@@ -1000,7 +1025,7 @@ def apply_thumb(img, info):
 
         def work():
             try:
-                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(local, 192, 192, True)
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(local, 256, 256, True)
                 pb = pb.apply_embedded_orientation() or pb
             except GLib.Error:
                 return
@@ -1076,12 +1101,13 @@ class FolderTab(Gtk.Box):
         self.sel = Gtk.MultiSelection.new(self.smodel)
         self.cv.set_model(self.sel)
 
-        gf = Gtk.SignalListItemFactory()
-        gf.connect("setup", self._setup_cell, "grid")
-        gf.connect("bind", self._bind_cell, "grid")
-        gf.connect("unbind", self._unbind_cell, "grid")
-        self.gv = Gtk.GridView(model=self.sel, factory=gf, enable_rubberband=True,
+        self.gv = Gtk.GridView(model=self.sel, factory=self._grid_factory(), enable_rubberband=True,
                                min_columns=2, max_columns=14)
+        zoom = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        zoom.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)  # before the scrolled window scrolls
+        zoom.connect("scroll", self._on_zoom_scroll)
+        self.gv.add_controller(zoom)
+        self._zoom_accum = 0.0
         for v in (self.cv, self.gv):
             v.connect("activate", lambda v, pos: self.activate(pos))
         self._attach_view_models()
@@ -1159,11 +1185,13 @@ class FolderTab(Gtk.Box):
 
     def _setup_cell(self, factory, li, kind):
         if kind == "grid":
+            size = self.win.icon_size
+            cell = max(96, size + 40)
             w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, halign=Gtk.Align.CENTER)
-            w.img = Gtk.Image(pixel_size=72)
+            w.img = Gtk.Image(pixel_size=size)
             w.lbl = Gtk.Label(justify=Gtk.Justification.CENTER, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
-                              lines=2, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=13)
-            w.set_size_request(112, -1)
+                              lines=2, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=max(9, round(cell / 8.6)))
+            w.set_size_request(cell, -1)
             w.append(w.img)
             w.append(w.lbl)
         elif kind == "name":
@@ -1316,6 +1344,25 @@ class FolderTab(Gtk.Box):
             return False
         if self.query and not self.searching:  # search results already match the query
             return self.query in info.get_display_name().casefold()
+        return True
+
+    def _grid_factory(self):
+        gf = Gtk.SignalListItemFactory()
+        gf.connect("setup", self._setup_cell, "grid")
+        gf.connect("bind", self._bind_cell, "grid")
+        gf.connect("unbind", self._unbind_cell, "grid")
+        return gf
+
+    def apply_zoom(self):
+        self.gv.set_factory(self._grid_factory())  # new factory = every cell is rebuilt at the new size
+
+    def _on_zoom_scroll(self, ctrl, dx, dy):
+        if not ctrl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK:
+            return False
+        self._zoom_accum += dy
+        if abs(self._zoom_accum) >= 1:
+            self.win.zoom(-1 if self._zoom_accum > 0 else 1)  # scroll up = bigger icons
+            self._zoom_accum = 0.0
         return True
 
     def _fit_columns(self, view, clock):
@@ -1519,8 +1566,17 @@ class FolderTab(Gtk.Box):
             self._select_pending()
         self._selection_changed()
 
+    def select_when_ready(self, name):
+        self.pending_select = name
+        self._pending_deadline = time.monotonic() + 4
+
     def _select_pending(self):
         name, self.pending_select = self.pending_select, None
+        found = any(self.sel.get_item(p).get_display_name() == name or self.sel.get_item(p).get_name() == name
+                    for p in range(self.sel.get_n_items()))
+        if not found and time.monotonic() < getattr(self, "_pending_deadline", 0):
+            self.pending_select = name  # not listed yet: try again at the next refresh
+            return
         for pos in range(self.sel.get_n_items()):
             if self.sel.get_item(pos).get_display_name() == name or self.sel.get_item(pos).get_name() == name:
                 self.sel.unselect_all()
@@ -1970,6 +2026,8 @@ class Window(Adw.ApplicationWindow):
             self.maximize()
         self.show_hidden = bool(cfg.get("show_hidden", False))
         self.deep_search = bool(cfg.get("search_deep", True))
+        saved = as_int(cfg.get("icon_size"), 72)
+        self.icon_size = min(ZOOM_STEPS, key=lambda z: abs(z - saved))
         self.compress_format = cfg.get("compress_format") if cfg.get("compress_format") in ARCHIVE_FORMATS else "zip"
         self.view_mode = cfg.get("view", "grid") if cfg.get("view") in ("grid", "list") else "grid"
         sort = cfg.get("sort") if isinstance(cfg.get("sort"), dict) else {}
@@ -2061,7 +2119,7 @@ class Window(Adw.ApplicationWindow):
         return False
 
     def save_prefs(self):
-        save_config({"view": self.view_mode, "show_hidden": self.show_hidden, "search_deep": self.deep_search, "compress_format": self.compress_format,
+        save_config({"view": self.view_mode, "show_hidden": self.show_hidden, "search_deep": self.deep_search, "compress_format": self.compress_format, "icon_size": self.icon_size,
                      "sort": {"key": self.sort_key, "desc": self.sort_desc}})
 
     # ---- UI construction
@@ -2258,6 +2316,11 @@ class Window(Adw.ApplicationWindow):
         add("side-rename", self._side_rename)
         add("side-reset", self._side_reset)
         add("side-unmount", self._side_unmount)
+        add("zoom-in", lambda: self.zoom(1), ["<Ctrl>plus", "<Ctrl>equal", "<Ctrl>KP_Add"])
+        add("zoom-out", lambda: self.zoom(-1), ["<Ctrl>minus", "<Ctrl>KP_Subtract"])
+        add("zoom-reset", lambda: self.zoom(0), ["<Ctrl>0", "<Ctrl>KP_0"])
+        add("new-file", self.new_file, ["<Ctrl><Alt>N"])
+        add("copy-path", self.copy_path, ["<Ctrl><Shift>C"])
         add("compress", self.compress)
         add("extract", self.extract)
         add("preview", self.preview)
@@ -2315,7 +2378,7 @@ class Window(Adw.ApplicationWindow):
         opens.append_item(hidden_when_disabled("Show in Folder", "win.show-in-folder"))
         opens.append_item(hidden_when_disabled("Open in Terminal", "win.terminal"))
         item.append_section(None, opens)
-        item.append_section(None, section([("Cut", "win.cut"), ("Copy", "win.copy")]))
+        item.append_section(None, section([("Cut", "win.cut"), ("Copy", "win.copy"), ("Copy Path", "win.copy-path")]))
         archives = Gio.Menu()
         archives.append("Compress…", "win.compress")
         archives.append_item(hidden_when_disabled("Extract Here", "win.extract"))
@@ -2335,12 +2398,13 @@ class Window(Adw.ApplicationWindow):
             # "Show/Hide Hidden Files" is a plain entry (not a tick box): a tick box makes GTK
             # reserve an indicator column on every row of the menu.
             bg = Gio.Menu()
-            bg.append_section(None, section([("New Folder", "win.new-folder"), ("Paste", "win.paste")]))
+            bg.append_section(None, section([("New Folder", "win.new-folder"), ("New File…", "win.new-file"),
+                                             ("Paste", "win.paste")]))
             bg.append_section(None, section([
                 ("Select All", "win.select-all"),
                 ("Hide Hidden Files" if self.show_hidden else "Show Hidden Files", "win.toggle-hidden")]))
             bg.append_section(None, section([("Open in New Tab", "win.new-tab"), ("Open in Terminal", "win.terminal"),
-                                             ("Split View", "win.toggle-split")]))
+                                             ("Copy Folder Path", "win.copy-path"), ("Split View", "win.toggle-split")]))
             here = self.tab().file if self.tab() else None
             fav_label = ("Remove from Favorites" if here is not None and self.is_favorite(here)
                          else "Add Folder to Favorites")
@@ -2441,7 +2505,13 @@ class Window(Adw.ApplicationWindow):
             box.append(Gtk.Image(icon_name=icon))
         else:
             box.append(Gtk.Image(gicon=icon))
-        box.append(Gtk.Label(label=shown, xalign=0, ellipsize=Pango.EllipsizeMode.END))
+        box.append(Gtk.Label(label=shown, xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END))
+        if mount is not None and mount_is_removable(mount):  # USB sticks, SD cards, network shares: one click to remove safely
+            eject = Gtk.Button(icon_name="media-eject-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat", "circular", "eject-button"],
+                               tooltip_text=("Disconnect" if mount.get_volume() is None else
+                                             "Eject" if mount.can_eject() else "Unmount"))
+            eject.connect("clicked", lambda *_: self.unmount_mount(mount, shown))
+            box.append(eject)
         bar = None
         if usage and file is not None:  # a thin bar under disks showing how full they are
             bar = Gtk.ProgressBar(css_classes=["disk-usage"], margin_start=28, margin_end=6, margin_bottom=4, visible=False)
@@ -2485,9 +2555,9 @@ class Window(Adw.ApplicationWindow):
             if row.key in self.labels:
                 labels.append("Reset Label", "win.side-reset")
             menu.append_section(None, labels)
-        if row.mount is not None and row.mount.can_unmount():
+        if row.mount is not None and (row.mount.can_unmount() or row.mount.can_eject()):
             eject = Gio.Menu()
-            eject.append("Unmount", "win.side-unmount")
+            eject.append("Eject" if row.mount.can_eject() else "Unmount", "win.side-unmount")
             menu.append_section(None, eject)
         pop = Gtk.PopoverMenu.new_from_model(menu)
         pop.set_parent(row)
@@ -2563,17 +2633,34 @@ class Window(Adw.ApplicationWindow):
 
     def _side_unmount(self):
         row = self._ctx_row
-        if row is None or row.mount is None:
-            return
+        if row is not None and row.mount is not None:
+            self.unmount_mount(row.mount, row.shown_label)
 
-        def done(mount, res):
+    def unmount_mount(self, mount, label):
+        """Unmount (and for USB sticks and the like, power off) a disk, letting the system ask for a password."""
+        eject = mount.can_eject()
+        removable = mount_is_removable(mount)
+
+        def done(m, res):
             try:
-                mount.unmount_with_operation_finish(res)
-                self.toast(f"Unmounted {row.shown_label}")
+                (m.eject_with_operation_finish if eject else m.unmount_with_operation_finish)(res)
+                if mount.get_volume() is None:
+                    self.toast(f"Disconnected “{label}”")
+                else:
+                    self.toast(f"“{label}” can now be safely removed" if removable else f"Unmounted “{label}”")
             except GLib.Error as e:
-                self.toast(f"Can't unmount: {e.message}")
+                if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.FAILED_HANDLED):
+                    return  # the password prompt was cancelled; the system already told the user
+                if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.BUSY):
+                    self.toast(f"“{label}” is in use. Close anything that is using it and try again.")
+                else:
+                    self.toast(f"Can't {'eject' if eject else 'unmount'} “{label}”: {e.message}")
 
-        row.mount.unmount_with_operation(Gio.MountUnmountFlags.NONE, Gtk.MountOperation(parent=self), None, done)
+        operation = Gtk.MountOperation(parent=self)
+        if eject:
+            mount.eject_with_operation(Gio.MountUnmountFlags.NONE, operation, None, done)
+        else:
+            mount.unmount_with_operation(Gio.MountUnmountFlags.NONE, operation, None, done)
 
     def rebuild_sidebar(self):
         self.side_list.remove_all()
@@ -2913,12 +3000,40 @@ class Window(Adw.ApplicationWindow):
         if archives:
             self.run_job(Job(f"Extracting {plural(len(archives), 'archive')}"), lambda job: extract_job(job, archives))
 
+    def new_file(self):
+        tab = self.tab()
+        folder = tab.file
+
+        def apply(name):
+            if "/" in name:
+                self.toast("Names can't contain “/”")
+                return
+            target = folder.get_child(name)
+            try:
+                target.create(Gio.FileCreateFlags.NONE, None).close(None)
+            except GLib.Error as e:
+                self.toast(f"“{name}” already exists" if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.EXISTS) else e.message)
+                return
+            self.push_undo({"kind": "mkdir", "file": target})
+            self.toast(f"Created “{name}”", undo=True)
+            tab.select_when_ready(name)
+
+        self._prompt("New File", "Create", "Untitled.txt", apply, select_stem=True)
+
+    def copy_path(self):
+        tab = self.tab()
+        files = tab.selected_files() or [tab.file]
+        self.cut_files = []  # the clipboard now holds text, not files
+        text = "\n".join(f.get_path() or f.get_uri() for f in files)
+        self.get_clipboard().set_content(Gdk.ContentProvider.new_for_value(text))
+        self.toast("Path copied" if len(files) == 1 else f"{len(files)} paths copied")
+
     def show_in_folder(self):
         tab = self.tab()
         infos = tab.selected_infos()
         if len(infos) == 1:
             f = info_file(infos[0])
-            tab.pending_select = f.get_basename()
+            tab.select_when_ready(f.get_basename())
             tab.navigate(f.get_parent())
 
     def _on_search_mode(self, *a):
@@ -2934,6 +3049,19 @@ class Window(Adw.ApplicationWindow):
         for t in self.tabs():
             t.set_view(mode)
         self.update_view_button()
+
+    def zoom(self, direction):
+        """Make grid icons bigger (+1), smaller (-1) or back to normal (0)."""
+        i = ZOOM_STEPS.index(self.icon_size)
+        new = ZOOM_STEPS.index(72) if direction == 0 else max(0, min(len(ZOOM_STEPS) - 1, i + direction))
+        if ZOOM_STEPS[new] == self.icon_size:
+            return
+        self.icon_size = ZOOM_STEPS[new]
+        self.save_prefs()
+        for t in self.tabs():
+            t.apply_zoom()
+        if self.view_mode != "grid":
+            self.toast(f"Icon size {self.icon_size}px (shown in the grid view)")
 
     def update_view_button(self):
         grid = self.view_mode == "grid"
@@ -2999,6 +3127,7 @@ class Window(Adw.ApplicationWindow):
         self.acts["copy-other"].set_enabled(other is not None and n > 0 and not trash)
         self.acts["move-other"].set_enabled(other is not None and n > 0 and not trash)
         self.acts["new-folder"].set_enabled(not trash)
+        self.acts["new-file"].set_enabled(not trash and local)
         dirs = [info_file(i) for i in infos if is_dir(i)]
         self.acts["favorite-add"].set_enabled(not trash and any(not self.is_favorite(d) for d in dirs))
         self.acts["favorite-remove"].set_enabled(not trash and bool(dirs) and all(self.is_favorite(d) for d in dirs))
