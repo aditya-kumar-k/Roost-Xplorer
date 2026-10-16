@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Roost Xplorer - a sleek, dark file manager for Linux (GTK 4 + libadwaita)."""
+import codecs
 import collections
 import errno
 import fnmatch
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -319,6 +322,8 @@ def tree_size(f, job=None):
 
 SEARCH_LIMIT = 5000           # stop a search after this many results
 SEARCH_BATCH = 12             # results handed to the window at a time: small, so the window never stalls
+TEXT_PREVIEW_LIMIT = 200_000   # bytes of a text file shown in the quick preview
+IMAGE_PREVIEW_MAX = 2400       # longest side, in pixels, of an image preview
 CHUNK = 4 * 1024 * 1024        # how much is copied between progress updates
 SYNC_EVERY = 16 * 1024 * 1024  # flush to a *different* drive this often, so progress reflects real writes
 
@@ -1241,6 +1246,16 @@ class FolderTab(Gtk.Box):
         self.gv.set_model(self.sel if mode == "grid" else None)
         self.cv.set_model(self.sel if mode == "list" else None)
 
+    def reveal(self, pos):
+        """Scroll an item into view."""
+        try:
+            if getattr(self, "view_mode", "grid") == "grid":
+                self.gv.scroll_to(pos, Gtk.ListScrollFlags.NONE, None)
+            else:
+                self.cv.scroll_to(pos, None, Gtk.ListScrollFlags.NONE, None)
+        except (TypeError, AttributeError):
+            pass
+
     def focus_view(self):
         (self.gv if getattr(self, "view_mode", "grid") == "grid" else self.cv).grab_focus()
 
@@ -1364,6 +1379,278 @@ class FolderTab(Gtk.Box):
         files = value.get_files()
         ctrl = ctrl_held(target)
         return self.win.drop_files(files, dest, copy=ctrl)
+
+
+def looks_like_text(path):
+    """True if the start of the file is valid UTF-8 text (no NUL bytes)."""
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(4096)
+    except OSError:
+        return False
+    if b"\0" in chunk:
+        return False
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(chunk, final=False)  # tolerates a cut-off last character
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def preview_kind(info, path):
+    if is_dir(info):
+        return "folder"
+    ct = content_type(info)
+    if ct.startswith("image/"):
+        return "image"
+    if ct == "application/pdf":
+        return "pdf"
+    if path and (ct.startswith("text/") or looks_like_text(path)):
+        return "text"
+    return "other"
+
+
+class PreviewDialog(Adw.Dialog):
+    """Quick look at a file: images, PDFs (first pages) and text. Left/Right step through the folder."""
+
+    def __init__(self, win, tab, pos):
+        super().__init__(content_width=1000, content_height=720, title="Preview")
+        self.win, self.tab, self.pos = win, tab, pos
+        self.kind, self.page, self.pages, self._gen = "other", 1, 1, 0
+        self.file = None
+
+        self.title = Adw.WindowTitle(title="", subtitle="")
+        header = Adw.HeaderBar(title_widget=self.title)
+        nav = Gtk.Box(css_classes=["linked"])
+        self.prev_btn = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Previous file (←)")
+        self.next_btn = Gtk.Button(icon_name="go-next-symbolic", tooltip_text="Next file (→)")
+        self.prev_btn.connect("clicked", lambda *a: self.step(-1))
+        self.next_btn.connect("clicked", lambda *a: self.step(1))
+        nav.append(self.prev_btn)
+        nav.append(self.next_btn)
+        header.pack_start(nav)
+        open_btn = Gtk.Button(label="Open", tooltip_text="Open with the default app (Enter)",
+                              css_classes=["suggested-action"])
+        open_btn.connect("clicked", lambda *a: self.open_file())
+        header.pack_end(open_btn)
+
+        self.picture = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=True, vexpand=True,
+                                   margin_top=8, margin_bottom=8, margin_start=8, margin_end=8)
+        self.text = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                 left_margin=16, right_margin=16, top_margin=12, bottom_margin=12)
+        self.info = Adw.StatusPage()
+        self.spinner = Gtk.Spinner(spinning=True, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
+                                   width_request=32, height_request=32)
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, vexpand=True)
+        self.stack.add_named(self.picture, "image")
+        self.stack.add_named(Gtk.ScrolledWindow(child=self.text), "text")
+        self.stack.add_named(self.info, "info")
+        self.stack.add_named(self.spinner, "loading")
+
+        self.page_prev = Gtk.Button(icon_name="go-up-symbolic", css_classes=["flat"], tooltip_text="Previous page (Page Up)")
+        self.page_next = Gtk.Button(icon_name="go-down-symbolic", css_classes=["flat"], tooltip_text="Next page (Page Down)")
+        self.page_prev.connect("clicked", lambda *a: self.turn_page(-1))
+        self.page_next.connect("clicked", lambda *a: self.turn_page(1))
+        self.note = Gtk.Label(css_classes=["dim-label", "caption"])
+        self.bar = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, margin_bottom=6, visible=False)
+        for w_ in (self.page_prev, self.note, self.page_next):
+            self.bar.append(w_)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(self.stack)
+        body.append(self.bar)
+        view = Adw.ToolbarView()
+        view.add_top_bar(header)
+        view.set_content(body)
+        self.set_child(view)
+
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+        self.show_item(pos)
+
+    # ---- keys and navigation
+    def _on_key(self, ctrl, keyval, keycode, state):
+        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+            return False
+        if keyval in (Gdk.KEY_space, Gdk.KEY_Escape):
+            self.close()
+        elif keyval in (Gdk.KEY_Left, Gdk.KEY_Right) or (keyval in (Gdk.KEY_Up, Gdk.KEY_Down) and self.kind != "text"):
+            self.step(-1 if keyval in (Gdk.KEY_Left, Gdk.KEY_Up) else 1)
+        elif keyval == Gdk.KEY_Page_Down and self.kind == "pdf":
+            self.turn_page(1)
+        elif keyval == Gdk.KEY_Page_Up and self.kind == "pdf":
+            self.turn_page(-1)
+        elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.open_file()
+        else:
+            return False
+        return True
+
+    def step(self, delta):
+        pos = self.pos + delta
+        if 0 <= pos < self.tab.sel.get_n_items():
+            self.show_item(pos)
+
+    def open_file(self):
+        if self.file is not None:
+            self.close()
+            self.win.launch(self.file)
+
+    def turn_page(self, delta):
+        page = self.page + delta
+        if self.kind == "pdf" and 1 <= page <= self.pages:
+            self.page = page
+            self._load_pdf()
+
+    # ---- showing one item
+    def show_item(self, pos):
+        self._gen += 1
+        self.pos = pos
+        info = self.tab.sel.get_item(pos)
+        self.file = info_file(info)
+        path = self.file.get_path()
+        total = self.tab.sel.get_n_items()
+        size = "" if is_dir(info) else f"{GLib.format_size(info.get_size())} · "
+        self.title.set_title(info.get_display_name())
+        self.title.set_subtitle(f"{type_description(info)} · {size}{pos + 1} of {total}")
+        self.prev_btn.set_sensitive(pos > 0)
+        self.next_btn.set_sensitive(pos < total - 1)
+        self.tab.sel.unselect_all()
+        self.tab.sel.select_item(pos, True)
+        self.tab.reveal(pos)
+        self.kind, self.page, self.pages = preview_kind(info, path), 1, 1
+        self.info_item = info
+        self.bar.set_visible(False)
+        self.stack.set_visible_child_name("loading")
+        if self.kind == "image":
+            self._start(self._read_image, path)
+        elif self.kind == "pdf":
+            self._load_pdf()
+        elif self.kind == "text":
+            self._start(self._read_text, path)
+        elif self.kind == "folder":
+            self._start(self._count_folder, path)
+        else:
+            thumb = info.get_attribute_byte_string("thumbnail::path")
+            self._show_thumbnail_or_card(info, thumb)
+
+    def _start(self, worker, *args):
+        gen = self._gen
+        threading.Thread(target=worker, args=(gen, *args), daemon=True).start()
+
+    def _deliver(self, gen, fn, *args):
+        def run():
+            if gen == self._gen and self.get_mapped():
+                fn(*args)
+            return False
+        GLib.idle_add(run)
+
+    # ---- the different kinds
+    def _read_image(self, gen, path):
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, IMAGE_PREVIEW_MAX, IMAGE_PREVIEW_MAX, True)
+            pb = pb.apply_embedded_orientation() or pb
+        except GLib.Error:
+            thumb = self.info_item.get_attribute_byte_string("thumbnail::path")
+            self._deliver(gen, self._show_thumbnail_or_card, self.info_item, thumb)
+            return
+        self._deliver(gen, self._set_texture, Gdk.Texture.new_for_pixbuf(pb))
+
+    def _set_texture(self, texture):
+        self.picture.set_paintable(texture)
+        self.stack.set_visible_child_name("image")
+
+    def _show_thumbnail_or_card(self, info, thumb):
+        if thumb:
+            try:
+                self._set_texture(Gdk.Texture.new_from_filename(thumb))
+                return
+            except GLib.Error:
+                pass
+        self._show_card(info)
+
+    def _show_card(self, info, extra=None):
+        icon = info.get_icon()
+        names = icon.get_names() if isinstance(icon, Gio.ThemedIcon) else []
+        self.info.set_icon_name(next((n for n in names if Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).has_icon(n)),
+                                     "text-x-generic-symbolic"))
+        self.info.set_title(info.get_display_name())
+        when = info.get_modification_date_time()
+        bits = [type_description(info)]
+        if not is_dir(info):
+            bits.append(GLib.format_size(info.get_size()))
+        if when:
+            bits.append("modified " + when.to_local().format("%-d %b %Y, %H:%M"))
+        self.info.set_description(extra or " · ".join(bits) + "\n\nNo preview is available for this type of file.")
+        self.stack.set_visible_child_name("info")
+
+    def _count_folder(self, gen, path):
+        try:
+            with os.scandir(path) as it:
+                n = sum(1 for _ in it)
+        except OSError:
+            n = None
+        text = "Could not read this folder." if n is None else f"Folder with {n:,} item{'s' if n != 1 else ''}."
+        self._deliver(gen, self._show_card, self.info_item, text)
+
+    def _read_text(self, gen, path):
+        try:
+            with open(path, "rb") as f:
+                raw = f.read(TEXT_PREVIEW_LIMIT + 1)
+        except OSError:
+            self._deliver(gen, self._show_card, self.info_item, "Could not read this file.")
+            return
+        truncated = len(raw) > TEXT_PREVIEW_LIMIT
+        text = raw[:TEXT_PREVIEW_LIMIT].decode("utf-8", errors="replace")
+        self._deliver(gen, self._set_text, text, truncated)
+
+    def _set_text(self, text, truncated):
+        self.text.get_buffer().set_text(text)
+        self.stack.set_visible_child_name("text")
+        self.bar.set_visible(truncated)
+        self.page_prev.set_visible(False)
+        self.page_next.set_visible(False)
+        self.note.set_text(f"Showing the first {TEXT_PREVIEW_LIMIT // 1000} KB")
+
+    def _load_pdf(self):
+        self.stack.set_visible_child_name("loading")
+        self._start(self._render_pdf, self.file.get_path(), self.page)
+
+    def _render_pdf(self, gen, path, page):
+        if not shutil.which("pdftoppm"):
+            self._deliver(gen, self._show_card, self.info_item,
+                          "PDF previews need the poppler tools. Install the “poppler-utils” package.")
+            return
+        pages = self.pages
+        if page == 1:
+            try:
+                out = subprocess.run(["pdfinfo", path], capture_output=True, text=True, timeout=15).stdout
+                pages = next((int(l.split()[1]) for l in out.splitlines() if l.startswith("Pages:")), 1)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pages = 1
+        tmp = tempfile.mkdtemp(prefix="roost-preview-")
+        try:
+            subprocess.run(["pdftoppm", "-png", "-r", "110", "-f", str(page), "-l", str(page), "-singlefile",
+                            path, os.path.join(tmp, "page")], capture_output=True, timeout=40, check=True)
+            texture = Gdk.Texture.new_from_filename(os.path.join(tmp, "page.png"))
+        except (OSError, subprocess.SubprocessError, GLib.Error):
+            self._deliver(gen, self._show_card, self.info_item, "This PDF could not be shown (it may be password protected).")
+            return
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self._deliver(gen, self._set_pdf_page, texture, pages)
+
+    def _set_pdf_page(self, texture, pages):
+        self.pages = pages
+        self._set_texture(texture)
+        self.bar.set_visible(pages > 1)
+        self.page_prev.set_visible(True)
+        self.page_next.set_visible(True)
+        self.page_prev.set_sensitive(self.page > 1)
+        self.page_next.set_sensitive(self.page < pages)
+        self.note.set_text(f"Page {self.page} of {pages}")
 
 
 class TabContainer(Gtk.Box):
@@ -1536,6 +1823,11 @@ class Window(Adw.ApplicationWindow):
 
     # ---- UI construction
     def _build_ui(self):
+        keys = Gtk.EventControllerKey()  # added first so Space reaches us before the search bar's type-to-search
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_window_key)
+        self.add_controller(keys)
+
         self.tabview = Adw.TabView()
         self.tabview.connect("notify::selected-page", lambda *a: self._on_tab_changed())
         self.tabview.connect("notify::n-pages", self._on_pages_changed)
@@ -1723,6 +2015,7 @@ class Window(Adw.ApplicationWindow):
         add("side-rename", self._side_rename)
         add("side-reset", self._side_reset)
         add("side-unmount", self._side_unmount)
+        add("preview", self.preview)
         add("show-in-folder", self.show_in_folder)
         add("toggle-hidden", lambda: self.lookup_action("show-hidden").activate(None))
         add("terminal", self.open_terminal)
@@ -1771,6 +2064,9 @@ class Window(Adw.ApplicationWindow):
         item = Gio.Menu()
         opens = section([("Open", "win.open"), ("Open in New Tab", "win.open-tab"),
                          ("Open With…", "win.open-with")])
+        preview = Gio.MenuItem.new("Preview", "win.preview")
+        preview.set_attribute_value("accel", GLib.Variant("s", "space"))
+        opens.append_item(preview)
         opens.append_item(hidden_when_disabled("Show in Folder", "win.show-in-folder"))
         opens.append_item(hidden_when_disabled("Open in Terminal", "win.terminal"))
         item.append_section(None, opens)
@@ -2290,6 +2586,27 @@ class Window(Adw.ApplicationWindow):
         self.search_spinner.set_visible(busy)
         self.search_spinner.set_spinning(busy)
 
+    def preview(self):
+        if self.get_visible_dialog() is not None:
+            return
+        tab = self.tab()
+        bs = tab.sel.get_selection()
+        if bs.get_size() == 0:
+            return
+        PreviewDialog(self, tab, bs.get_nth(0)).present(self)
+
+    def _on_window_key(self, ctrl, keyval, keycode, state):
+        """Space previews the selected file, unless you are typing somewhere or a dialog is open."""
+        if keyval != Gdk.KEY_space or state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
+                                                | Gdk.ModifierType.SHIFT_MASK):
+            return False
+        if self.get_visible_dialog() is not None or isinstance(self.get_focus(), Gtk.Editable):
+            return False
+        if not self.acts["preview"].get_enabled():
+            return False
+        self.preview()
+        return True
+
     def show_in_folder(self):
         tab = self.tab()
         infos = tab.selected_infos()
@@ -2353,6 +2670,7 @@ class Window(Adw.ApplicationWindow):
         n = len(infos)
         trash = tab.file.get_uri_scheme() == "trash"
         self.acts["open"].set_enabled(n > 0)
+        self.acts["preview"].set_enabled(n > 0 and info_file(infos[0]).get_path() is not None)
         self.acts["show-in-folder"].set_enabled(tab.searching and n == 1)
         self.acts["open-tab"].set_enabled(any(is_dir(i) for i in infos))
         self.acts["open-with"].set_enabled(n == 1 and not is_dir(infos[0]))
