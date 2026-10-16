@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Roost Xplorer: a bat roosting upside down on a branch -->
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 20 H114" stroke="#6b7079" stroke-width="5" fill="none"/>
+    <path d="M56 20 V31 M72 20 V31" stroke="#8b9099" stroke-width="4" fill="none"/>
+    <!-- wings folded around the body like a cloak -->
+    <path fill="#9aa0a9" stroke="#9aa0a9" stroke-width="2"
+          d="M64 30 C48 33 30 48 29 70 C28 82 34 90 42 92 L47 86 L53 94 L59 87 L64 95 L69 87 L75 94 L81 86 L86 92 C94 90 100 82 99 70 C98 48 80 33 64 30 Z"/>
+    <path d="M64 33 C58 52 56 72 58 88 M64 33 C70 52 72 72 70 88 M64 33 C50 46 44 64 46 84 M64 33 C78 46 84 64 82 84"
+          stroke="#656a73" stroke-width="2.2" fill="none"/>
+    <!-- head with ears pointing down -->
+    <path fill="#9aa0a9" stroke="#9aa0a9" stroke-width="2"
+          d="M52 99 L50 118 L61 108 C62.5 108.7 65.5 108.7 67 108 L78 118 L76 99 C72 94 56 94 52 99 Z"/>
+    <circle cx="58.5" cy="102" r="2.1" fill="#0b0b0d" stroke="none"/>
+    <circle cx="69.5" cy="102" r="2.1" fill="#0b0b0d" stroke="none"/>
+  </g>
+</svg>
