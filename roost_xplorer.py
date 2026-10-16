@@ -102,6 +102,10 @@ columnview row:selected, listview row:selected, .navigation-sidebar row:selected
 .pane-active { border-top: 2px solid @accent_bg_color; }
 .pane-inactive { border-top: 2px solid transparent; }
 .pane-inactive .status-bar, .pane-inactive .pane-title { opacity: 0.45; }
+/* soft colour changes on hover and selection instead of instant jumps */
+gridview > child, columnview row, .navigation-sidebar row, headerbar button, .crumb, windowcontrols button {
+  transition: background-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
 .eject-button { min-width: 26px; min-height: 26px; padding: 0; margin: 0; }
 .eject-button:hover { color: @accent_color; }
 progressbar.disk-usage trough { min-height: 4px; border-radius: 2px; background-color: alpha(white, 0.14); }
@@ -325,6 +329,20 @@ def _cancel_or_raise(e):
     if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
         raise Cancelled() from e
     raise e
+
+
+def animate_fraction(bar, target, duration=170):
+    """Glide a progress bar to a new value instead of jumping."""
+    current = bar.get_fraction()
+    if abs(target - current) < 0.002:
+        return
+    old = getattr(bar, "_anim", None)
+    if old is not None:
+        old.skip()
+    anim = Adw.TimedAnimation.new(bar, current, target, duration, Adw.CallbackAnimationTarget.new(bar.set_fraction))
+    anim.set_easing(Adw.Easing.EASE_OUT_CUBIC)
+    bar._anim = anim
+    anim.play()
 
 
 def tree_size(f, job=None):
@@ -1123,7 +1141,7 @@ class FolderTab(Gtk.Box):
         claim.connect("pressed", lambda *a: self._claim())
         self.add_controller(claim)
 
-        self.stack = Gtk.Stack()
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=140)
         self.stack.add_named(scroller(self.gv), "grid")
         self.stack.add_named(scroller(self.cv), "list")
         self.empty = Adw.StatusPage(icon_name="folder-symbolic", title="Folder is Empty")
@@ -2712,8 +2730,10 @@ class Window(Adw.ApplicationWindow):
             bar.set_visible(False)
             return
         fraction = max(0.0, min(1.0, (size - free) / size))
-        bar.set_fraction(fraction)
+        if not bar.get_visible():
+            bar.set_fraction(0)  # the first time: fill up from empty
         bar.set_visible(True)
+        animate_fraction(bar, fraction, 450)
         if fraction >= 0.9:
             bar.add_css_class("full")
         else:
@@ -3190,7 +3210,7 @@ class Window(Adw.ApplicationWindow):
         for job in self.jobs:
             box, bar, status, detail = self.job_rows[job]
             if job.total:
-                bar.set_fraction(job.fraction)
+                animate_fraction(bar, job.fraction)
                 detail.set_text(job.detail())
             else:
                 bar.pulse()
@@ -3198,7 +3218,7 @@ class Window(Adw.ApplicationWindow):
         self.ops_btn.set_visible(True)
         avg = sum(j.fraction for j in self.jobs) / len(self.jobs)
         if any(j.total for j in self.jobs):
-            self.ops_bar.set_fraction(avg)
+            animate_fraction(self.ops_bar, avg)
             self.ops_label.set_text(f"{round(avg * 100)}%")
             first = self.jobs[0]
             self.ops_btn.set_tooltip_text(f"{first.title}\n{first.detail()}")
