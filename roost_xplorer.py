@@ -2333,22 +2333,34 @@ class WaylandBlur:
             return None
         return self.gtk.gdk_wayland_surface_get_wl_surface(ctypes.c_void_p(hash(surface)))
 
-    def _set_region(self, effect, on):
+    def _set_region(self, effect, on, shape=None):
         P, U32, I32 = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int32
         lib = self.lib
         region = P(None)
         if on:  # the whole window (the compositor clips an oversized region to the window)
             region = P(lib.wl_proxy_marshal_flags(self.compositor, U32(1), P(ctypes.addressof(self.region_if)),
                                                   U32(lib.wl_proxy_get_version(self.compositor)), U32(0), P(None)))
-            lib.wl_proxy_marshal_flags(region, U32(1), P(None), U32(lib.wl_proxy_get_version(region)), U32(0),
-                                       I32(0), I32(0), I32(32767), I32(32767))
+            def add(x, y, w, h):
+                lib.wl_proxy_marshal_flags(region, U32(1), P(None), U32(lib.wl_proxy_get_version(region)), U32(0),
+                                           I32(x), I32(y), I32(w), I32(h))
+            if shape is None:
+                add(0, 0, 32767, 32767)
+            else:  # a rounded rectangle, built from one-pixel strips (regions only know rectangles)
+                x, y, w, h, r = shape
+                r = min(r, w // 2, h // 2)
+                for i in range(r):
+                    inset = r - int(round((r * r - (r - i - 0.5) ** 2) ** 0.5))
+                    add(x + inset, y + i, w - 2 * inset, 1)
+                    add(x + inset, y + h - 1 - i, w - 2 * inset, 1)
+                add(x, y + r, w, h - 2 * r)
         lib.wl_proxy_marshal_flags(effect, U32(1), P(None), U32(1), U32(0), region)
         if on:
             lib.wl_proxy_marshal_flags(region, U32(0), P(None), U32(lib.wl_proxy_get_version(region)), U32(1))
         lib.wl_display_flush(self.display)
 
-    def set(self, window, on):
-        """Turn the blur behind this window on or off. Safe to call any time; does nothing if unsupported."""
+    def set(self, window, on, shape=None):
+        """Turn the blur behind this window on or off. Safe to call any time; does nothing if unsupported.
+        `shape` (x, y, w, h, radius) limits it to a rounded rectangle instead of the whole surface."""
         if not self.ok:
             return
         try:
@@ -2363,7 +2375,7 @@ class WaylandBlur:
                 effect = P(self.lib.wl_proxy_marshal_flags(self.manager, U32(1), P(ctypes.addressof(self.effect_if)), U32(1),
                                                            U32(0), P(None), P(surface)))
                 self._effects[surface] = effect
-            self._set_region(effect, on)
+            self._set_region(effect, on, shape)
             window.queue_draw()  # the change takes effect with the window's next frame
         except Exception:  # noqa: BLE001
             pass
@@ -2428,7 +2440,21 @@ class MenuStyle:
 
     def attach(self, pop):
         """Blur behind this menu while it is open (only when the system asks for transparent menus)."""
-        pop.connect("map", lambda p: WaylandBlur.get().set(p, self.opacity < 1.0))
+        def shape_blur(p):
+            # the popup's surface is bigger than the visible menu (it holds the shadow), so blur only the
+            # rounded menu itself; otherwise the blur shows as square corners around it
+            child = p.get_first_child()
+            while child is not None and child.get_css_name() != "contents":
+                child = child.get_next_sibling()
+            ok, bounds = child.compute_bounds(p) if child is not None else (False, None)
+            if not ok or not p.get_mapped():
+                return False
+            dx, dy = p.get_surface_transform()
+            WaylandBlur.get().set(p, True, (int(dx + bounds.get_x()), int(dy + bounds.get_y()),
+                                            int(bounds.get_width()), int(bounds.get_height()), 12))
+            return False
+
+        pop.connect("map", lambda p: self.opacity < 1.0 and GLib.idle_add(shape_blur, p))
         pop.connect("closed", lambda p: WaylandBlur.get().release(p))
 
 
