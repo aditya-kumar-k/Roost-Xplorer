@@ -1085,6 +1085,189 @@ def files_value(files):
 
 
 # --------------------------------------------------------------------- tab
+class FolderModel(Gio.ListStore):
+    """The contents of one folder, kept live by watching it.
+
+    GTK's own folder list stops updating after certain quick sequences (for example a hidden scratch folder that is
+    created and renamed straight away, which is how extracting an archive works). This one handles every kind of
+    change itself, and can also re-check the whole folder (resync) to catch anything a watcher missed, which
+    matters on network shares and some external drives."""
+
+    loading = GObject.Property(type=bool, default=False)
+    error = GObject.Property(type=object)
+
+    def __init__(self):
+        super().__init__(item_type=Gio.FileInfo)
+        self.file = None
+        self._gen = 0
+        self._cancel = None
+        self._monitor = None
+        self._poll = None
+        self._resyncing = False
+
+    def is_loading(self):
+        return self.props.loading
+
+    def get_error(self):
+        return self.props.error
+
+    # ---- loading a folder
+    def set_file(self, file):
+        self._stop()
+        self.file = file
+        self.remove_all()
+        self.props.error = None
+        self.props.loading = True
+        gen = self._gen
+        try:  # watch for changes (renames and moves included)
+            self._monitor = file.monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+            self._monitor.connect("changed", self._on_event)
+        except GLib.Error:
+            self._monitor = None
+        if self._monitor is None:  # a place that can't be watched (some network shares): look again every few seconds
+            self._poll = GLib.timeout_add_seconds(3, self._poll_tick)
+        self._enumerate(gen, file, initial=True)
+
+    def _stop(self):
+        self._gen += 1  # answers to anything still in flight are ignored
+        if self._cancel is not None:
+            self._cancel.cancel()
+            self._cancel = None
+        if self._monitor is not None:
+            self._monitor.cancel()
+            self._monitor = None
+        if self._poll is not None:
+            GLib.source_remove(self._poll)
+            self._poll = None
+        self._resyncing = False
+
+    def _enumerate(self, gen, folder, initial):
+        cancel = self._cancel = Gio.Cancellable()
+        collected = []
+
+        def finished(error=None):
+            if gen != self._gen:
+                return
+            if initial:
+                self.props.loading = False
+                if error is not None:
+                    self.props.error = error
+            else:
+                self._resyncing = False
+                if error is None:
+                    self._apply_diff(collected)
+
+        def on_enum(f, res):
+            if gen != self._gen:
+                return
+            try:
+                enum = f.enumerate_children_finish(res)
+            except GLib.Error as e:
+                return finished(e)
+            enum.next_files_async(500, GLib.PRIORITY_DEFAULT, cancel, on_batch, enum)
+
+        def on_batch(enum, res, _data=None):
+            if gen != self._gen:
+                return
+            try:
+                infos = enum.next_files_finish(res)
+            except GLib.Error as e:
+                return finished(e)
+            if not infos:
+                enum.close_async(GLib.PRIORITY_DEFAULT, None, None)
+                return finished()
+            self._prepare(infos, folder)
+            if initial:
+                self.splice(self.get_n_items(), 0, infos)  # show them as they arrive
+            else:
+                collected.extend(infos)
+            enum.next_files_async(500, GLib.PRIORITY_DEFAULT, cancel, on_batch, enum)
+
+        folder.enumerate_children_async(ATTRS, Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT, cancel, on_enum)
+
+    @staticmethod
+    def _prepare(infos, folder):
+        for info in infos:
+            info.set_attribute_object("standard::file", folder.get_child(info.get_name()))
+
+    # ---- keeping it up to date
+    def _find(self, name):
+        for pos in range(self.get_n_items()):
+            if self.get_item(pos).get_name() == name:
+                return pos
+        return None
+
+    @staticmethod
+    def _same(a, b):
+        return (a.get_size() == b.get_size() and a.get_display_name() == b.get_display_name()
+                and a.get_file_type() == b.get_file_type()
+                and (a.get_modification_date_time() and a.get_modification_date_time().to_unix()) ==
+                (b.get_modification_date_time() and b.get_modification_date_time().to_unix()))
+
+    def _on_event(self, monitor, file, other, event):
+        E = Gio.FileMonitorEvent
+        if self.file is None or file.equal(self.file):
+            return
+        if event in (E.CREATED, E.MOVED_IN, E.CHANGES_DONE_HINT, E.ATTRIBUTE_CHANGED):
+            self._upsert(file)
+        elif event in (E.DELETED, E.MOVED_OUT):
+            self._remove(file)
+        elif event == E.RENAMED:
+            self._remove(file)
+            if other is not None:
+                self._upsert(other)
+
+    def _upsert(self, child):
+        gen = self._gen
+
+        def done(f, res):
+            if gen != self._gen:
+                return
+            try:
+                info = f.query_info_finish(res)
+            except GLib.Error:  # it is already gone again (a short-lived file)
+                self._remove(f)
+                return
+            info.set_attribute_object("standard::file", f)
+            pos = self._find(f.get_basename())
+            if pos is None:
+                self.append(info)
+            elif not self._same(self.get_item(pos), info):
+                self.splice(pos, 1, [info])
+
+        child.query_info_async(ATTRS, Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT, None, done)
+
+    def _remove(self, child):
+        pos = self._find(child.get_basename())
+        if pos is not None:
+            self.remove(pos)
+
+    # ---- double-checking
+    def resync(self):
+        """Compare the real folder with what is shown and fix any difference."""
+        if self.file is None or self.props.loading or self._resyncing:
+            return
+        self._resyncing = True
+        self._enumerate(self._gen, self.file, initial=False)
+
+    def _poll_tick(self):
+        self.resync()
+        return True
+
+    def _apply_diff(self, fresh):
+        new = {i.get_name(): i for i in fresh}
+        for pos in range(self.get_n_items() - 1, -1, -1):  # gone from disk
+            if self.get_item(pos).get_name() not in new:
+                self.remove(pos)
+        have = {self.get_item(pos).get_name(): pos for pos in range(self.get_n_items())}
+        for name, info in new.items():
+            pos = have.get(name)
+            if pos is None:
+                self.append(info)
+            elif not self._same(self.get_item(pos), info):
+                self.splice(pos, 1, [info])
+
+
 class FolderTab(Gtk.Box):
     def __init__(self, win, file):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
@@ -1095,8 +1278,7 @@ class FolderTab(Gtk.Box):
         self.idx = -1
         self.query = ""
 
-        self.dirlist = Gtk.DirectoryList.new(ATTRS, None)
-        self.dirlist.set_monitored(True)
+        self.dirlist = FolderModel()
         self.dirlist.connect("notify::error", self._on_error)
         self.dirlist.connect("notify::loading", lambda *a: self._refresh())
 
@@ -2320,6 +2502,7 @@ class Window(Adw.ApplicationWindow):
         self.sidebar_btn.set_active(bool(cfg.get("sidebar_visible", True)))
         self.update_view_button()
         self.apply_look()
+        self.connect("notify::is-active", lambda *a: self.is_active() and self.resync_folders())
         self.connect("map", lambda *a: WaylandBlur.get().set(self, self.translucent))
         self.connect("unmap", lambda *a: WaylandBlur.get().release(self))  # before the surface is destroyed
         if empty:
@@ -3534,6 +3717,13 @@ class Window(Adw.ApplicationWindow):
         if self.view_mode != "grid":
             self.toast(f"Icon size {self.icon_size}px (shown in the grid view)")
 
+    def resync_folders(self):
+        """Double-check the folders on screen against the disk (catches changes a watcher can miss)."""
+        cont = self.container()
+        if cont is not None:
+            for pane in cont.panes:
+                pane.dirlist.resync()
+
     def apply_look(self):
         if self.translucent:
             self.add_css_class("translucent")
@@ -3713,6 +3903,7 @@ class Window(Adw.ApplicationWindow):
                 self.ops_bar.set_fraction(1)
             GLib.timeout_add(1800, self._hide_ops)
         GLib.timeout_add(1500, lambda: (self.refresh_disk_usage(), False)[1])  # free space just changed
+        GLib.timeout_add(500, lambda: (self.resync_folders(), False)[1])  # make sure the listing shows the result
         if job.undo:
             self.undo_stack.append(job.undo)
             del self.undo_stack[:-30]
