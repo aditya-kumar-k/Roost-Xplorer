@@ -2344,6 +2344,7 @@ class Window(Adw.ApplicationWindow):
         add("paste", self.paste, ["<Ctrl>V"])
         add("rename", self.rename, ["F2"])
         add("trash", self.trash, ["Delete"])
+        add("delete-permanently", self.delete_permanently, ["<Shift>Delete", "<Shift>KP_Delete"])
         add("new-folder", self.new_folder, ["<Ctrl><Shift>N"])
         add("select-all", lambda: self.tab().sel.select_all(), ["<Ctrl>A"])
         add("toggle-split", self.toggle_split, ["F3"])
@@ -2432,7 +2433,8 @@ class Window(Adw.ApplicationWindow):
         archives.append("Compress…", "win.compress")
         archives.append_item(hidden_when_disabled("Extract Here", "win.extract"))
         item.append_section(None, archives)
-        item.append_section(None, section([("Rename…", "win.rename"), ("Move to Trash", "win.trash")]))
+        item.append_section(None, section([("Rename…", "win.rename"), ("Move to Trash", "win.trash"),
+                                                   ("Delete Permanently…", "win.delete-permanently")]))
         panes = Gio.Menu()
         panes.append_item(hidden_when_disabled("Copy to Other Pane", "win.copy-other"))
         panes.append_item(hidden_when_disabled("Move to Other Pane", "win.move-other"))
@@ -3313,6 +3315,7 @@ class Window(Adw.ApplicationWindow):
         self.acts["copy"].set_enabled(n > 0 and not trash)
         self.acts["rename"].set_enabled(n == 1 and not trash)
         self.acts["trash"].set_enabled(n > 0)
+        self.acts["delete-permanently"].set_enabled(n > 0)
         self.acts["paste"].set_enabled(not trash)
         local = tab.file.get_path() is not None
         self.acts["terminal"].set_enabled(local and not trash and (n == 0 or (n == 1 and is_dir(infos[0]))))
@@ -3629,16 +3632,32 @@ class Window(Adw.ApplicationWindow):
         if not files:
             return
         if self.tab().file.get_uri_scheme() == "trash":
-            d = Adw.AlertDialog(heading="Delete Permanently?",
-                                body=f"{len(files)} item{'s' if len(files) != 1 else ''} will be deleted forever.")
-            d.add_response("cancel", "Cancel")
-            d.add_response("delete", "Delete")
-            d.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
-            d.set_close_response("cancel")
-            d.connect("response", lambda d, r: r == "delete" and self.trash_files(files, permanent=True))
-            d.present(self)
+            self.confirm_permanent_delete(files)  # things in the Trash can only be deleted for good
         else:
             self.trash_files(files)
+
+    def delete_permanently(self):
+        """Shift+Delete: delete for good, skipping the Trash, after asking."""
+        files = self.tab().selected_files()
+        if files:
+            self.confirm_permanent_delete(files)
+
+    def confirm_permanent_delete(self, files):
+        files = list(files)
+        if len(files) == 1:
+            name = files[0].get_basename()
+            what = f"“{name}” and everything inside it" if file_is_dir(files[0]) else f"“{name}”"
+        else:
+            what = f"{len(files)} items (and everything inside any folders)" if any(file_is_dir(f) for f in files) else f"{len(files)} items"
+        d = Adw.AlertDialog(heading="Delete Permanently?",
+                            body=f"{what} will be deleted forever, without going to the Trash. This can't be undone.")
+        d.add_response("cancel", "Cancel")
+        d.add_response("delete", "Delete Permanently")
+        d.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        d.set_default_response("cancel")  # a stray Enter must not delete anything
+        d.set_close_response("cancel")
+        d.connect("response", lambda dlg, r: r == "delete" and self.trash_files(files, permanent=True))
+        d.present(self)
 
     TERMINALS = ["konsole", "ptyxis", "gnome-terminal", "kgx", "xfce4-terminal", "alacritty",
                  "kitty", "foot", "wezterm", "xterm"]

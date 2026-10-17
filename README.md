@@ -170,6 +170,7 @@ Then delete the cloned folder if you like.
 | Cut / copy / paste | <kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd> |
 | Rename | <kbd>F2</kbd> |
 | Move to Trash | <kbd>Delete</kbd> |
+| Delete permanently (asks first) | <kbd>Shift</kbd>+<kbd>Delete</kbd> |
 | New folder / new file | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> / <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> |
 | Copy the path | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> |
 | Select all | <kbd>Ctrl</kbd>+<kbd>A</kbd> |
