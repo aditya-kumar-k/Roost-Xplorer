@@ -2797,6 +2797,7 @@ class Window(Adw.ApplicationWindow):
         add("compress", self.compress)
         add("extract", self.extract)
         add("preview", self.preview)
+        add("set-wallpaper", self.set_wallpaper)
         add("show-in-folder", self.show_in_folder)
         add("toggle-hidden", lambda: self.lookup_action("show-hidden").activate(None))
         add("terminal", self.open_terminal)
@@ -2851,6 +2852,7 @@ class Window(Adw.ApplicationWindow):
         preview = Gio.MenuItem.new("Preview", "win.preview")
         preview.set_attribute_value("accel", GLib.Variant("s", "space"))
         opens.append_item(preview)
+        opens.append_item(hidden_when_disabled("Set as Background", "win.set-wallpaper"))
         opens.append_item(hidden_when_disabled("Show in Folder", "win.show-in-folder"))
         opens.append_item(hidden_when_disabled("Open in Terminal", "win.terminal"))
         item.append_section(None, opens)
@@ -3552,6 +3554,17 @@ class Window(Adw.ApplicationWindow):
         self.search_spinner.set_visible(busy)
         self.search_spinner.set_spinning(busy)
 
+    def set_wallpaper(self):
+        infos = self.tab().selected_infos()
+        path = info_file(infos[0]).get_path() if len(infos) == 1 else None
+        if not path:
+            return
+        try:
+            subprocess.Popen(["plasma-apply-wallpaperimage", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.toast("Background changed")
+        except OSError:
+            self.toast("Setting the background needs KDE Plasma")
+
     def preview(self):
         if self.get_visible_dialog() is not None:
             return
@@ -3792,6 +3805,9 @@ class Window(Adw.ApplicationWindow):
         self.acts["show-in-folder"].set_enabled(tab.searching and n == 1)
         self.acts["open-tab"].set_enabled(any(is_dir(i) for i in infos))
         self.acts["open-with"].set_enabled(n == 1 and not is_dir(infos[0]))
+        self.acts["set-wallpaper"].set_enabled(
+            n == 1 and not is_dir(infos[0]) and content_type(infos[0]).startswith("image/")
+            and info_file(infos[0]).get_path() is not None and shutil.which("plasma-apply-wallpaperimage") is not None)
         self.acts["cut"].set_enabled(n > 0 and not trash)
         self.acts["copy"].set_enabled(n > 0 and not trash)
         self.acts["rename"].set_enabled(n == 1 and not trash)
