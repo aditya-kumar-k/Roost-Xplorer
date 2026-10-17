@@ -62,7 +62,7 @@ Roost Xplorer is a file manager written in Python. It follows your GNOME/libadwa
 - **New File** (next to New Folder) and **Copy Path** (copies the full path of the selection, or of the current folder).
 
 **Everyday touches**
-- **Translucent Blur** (main menu): a see-through window with a frosted-glass blur behind it, so your wallpaper shows through softly. The blur needs a desktop that supports it (KDE Plasma 6 does); elsewhere you still get the translucent look, just without the blur. Turn it off for a solid window. Popups and dialogs always stay solid so text stays readable.
+- **Translucent Blur** (main menu): a see-through window with a frosted-glass blur behind it, so your wallpaper shows through softly. The blur needs a desktop that supports it (KDE Plasma 6 does); elsewhere you still get the translucent look, just without the blur. Turn it off for a solid window. Dialogs always stay solid so text stays readable. Right-click and drop-down menus follow your KDE menu transparency setting (System Settings → Breeze → Transparency), blur included, and update live when you change it.
 - Soft hover and selection fades, a short crossfade when switching views, and progress bars that glide.
 - Right-click menus with Open With, Open in Terminal, Properties (folder sizes included) and more.
 - Trash with **Restore** (to the original location) and **Empty Trash**.
