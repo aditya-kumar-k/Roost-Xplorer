@@ -2,6 +2,8 @@
 """Roost Xplorer - a sleek, dark file manager for Linux (GTK 4 + libadwaita)."""
 import codecs
 import collections
+import ctypes
+import ctypes.util
 import errno
 import fnmatch
 import json
@@ -144,6 +146,19 @@ headerbar windowcontrols button.close:hover { background-color: #c01c28; color: 
 headerbar windowcontrols button:active { background-color: alpha(@accent_bg_color, 0.35); }
 headerbar windowcontrols button.close:active { background-color: #9b1620; }
 searchbar > revealer > box { background-color: #121215; }
+"""
+
+# The translucent look: the window background is about 78% opaque, the file area is left clear and the sidebar
+# and header add a light tint on top. Popups and dialogs keep their solid backgrounds so text stays readable.
+CSS += """
+window.translucent {
+  --window-bg-color: rgba(11, 11, 13, 0.78);
+  --view-bg-color: rgba(9, 9, 11, 0);
+  --headerbar-bg-color: rgba(18, 18, 21, 0.38);
+  --headerbar-backdrop-color: rgba(14, 14, 16, 0.38);
+  --sidebar-bg-color: rgba(15, 15, 18, 0.28);
+  --sidebar-backdrop-color: rgba(12, 12, 14, 0.28);
+}
 """
 
 THUMB_CACHE = {}
@@ -2013,6 +2028,183 @@ class PreviewDialog(Adw.Dialog):
         self.note.set_text(f"Page {self.page} of {pages}")
 
 
+class _WlMessage(ctypes.Structure):
+    _fields_ = [("name", ctypes.c_char_p), ("signature", ctypes.c_char_p), ("types", ctypes.POINTER(ctypes.c_void_p))]
+
+
+class _WlInterface(ctypes.Structure):
+    _fields_ = [("name", ctypes.c_char_p), ("version", ctypes.c_int), ("method_count", ctypes.c_int),
+                ("methods", ctypes.POINTER(_WlMessage)), ("event_count", ctypes.c_int),
+                ("events", ctypes.POINTER(_WlMessage))]
+
+
+class WaylandBlur:
+    """Asks the desktop to blur whatever is behind a window ("frosted glass").
+
+    GTK has no API for this, so it speaks the Wayland ext-background-effect protocol directly. KDE Plasma 6
+    supports it. Everywhere else (other compositors, X11) this quietly does nothing, so the app just stays
+    translucent without the blur. Mistakes here cannot be caught in Python (the compositor drops the whole
+    connection), so the rules are strict: one effect per window surface, and it is released before the surface
+    goes away."""
+
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.ok = False
+        self._effects = {}  # wl_surface address -> effect proxy
+        self._keep = []     # ctypes objects that must outlive the calls into libwayland
+        try:
+            self._connect()
+        except Exception:  # noqa: BLE001 - anything unexpected just means "no blur here"
+            self.ok = False
+
+    def _interface(self, name, methods, events):
+        def messages(items):
+            arr = (_WlMessage * max(1, len(items)))()
+            for i, (n, sig, types) in enumerate(items):
+                t = (ctypes.c_void_p * max(1, len(types)))(*[ctypes.addressof(x) if x is not None else None for x in types])
+                self._keep.append(t)
+                arr[i] = _WlMessage(n.encode(), sig.encode(), ctypes.cast(t, ctypes.POINTER(ctypes.c_void_p)))
+            self._keep.append(arr)
+            return arr
+        m, e = messages(methods), messages(events)
+        iface = _WlInterface(name.encode(), 1, len(methods), ctypes.cast(m, ctypes.POINTER(_WlMessage)),
+                             len(events), ctypes.cast(e, ctypes.POINTER(_WlMessage)))
+        self._keep.append(iface)
+        return iface
+
+    def _connect(self):
+        gi.require_version("GdkWayland", "4.0")
+        from gi.repository import GdkWayland
+        gdk_display = Gdk.Display.get_default()
+        if not isinstance(gdk_display, GdkWayland.WaylandDisplay):
+            return
+        lib = ctypes.CDLL(ctypes.util.find_library("wayland-client"))
+        gtk = ctypes.CDLL("libgtk-4.so.1")
+        if not hasattr(lib, "wl_proxy_marshal_flags"):
+            return
+        self.lib, self.gtk = lib, gtk
+        P, U32 = ctypes.c_void_p, ctypes.c_uint32
+        lib.wl_proxy_marshal_flags.restype = ctypes.c_void_p
+        lib.wl_display_create_queue.restype = ctypes.c_void_p
+        lib.wl_proxy_create_wrapper.restype = ctypes.c_void_p
+        lib.wl_proxy_get_version.restype = ctypes.c_uint32
+        gtk.gdk_wayland_display_get_wl_display.restype = ctypes.c_void_p
+        gtk.gdk_wayland_display_get_wl_display.argtypes = [ctypes.c_void_p]
+        gtk.gdk_wayland_surface_get_wl_surface.restype = ctypes.c_void_p
+        gtk.gdk_wayland_surface_get_wl_surface.argtypes = [ctypes.c_void_p]
+
+        wl_registry = _WlInterface.in_dll(lib, "wl_registry_interface")
+        wl_surface = _WlInterface.in_dll(lib, "wl_surface_interface")
+        wl_region = _WlInterface.in_dll(lib, "wl_region_interface")
+        wl_compositor = _WlInterface.in_dll(lib, "wl_compositor_interface")
+        self.effect_if = self._interface("ext_background_effect_v1",
+                                         [("destroy", "", []), ("set_blur_region", "?o", [wl_region])], [])
+        manager_if = self._interface("ext_background_effect_manager_v1",
+                                     [("destroy", "", []), ("get_background_effect", "no", [self.effect_if, wl_surface])],
+                                     [("capabilities", "u", [None])])
+        self.region_if = wl_region
+        # use a private event queue so we never disturb GTK's own handling of the connection
+        self.display = P(gtk.gdk_wayland_display_get_wl_display(ctypes.c_void_p(hash(gdk_display))))
+        queue = P(lib.wl_display_create_queue(self.display))
+        wrapper = P(lib.wl_proxy_create_wrapper(self.display))
+        lib.wl_proxy_set_queue(wrapper, queue)
+        registry = P(lib.wl_proxy_marshal_flags(wrapper, U32(1), P(ctypes.addressof(wl_registry)), U32(1), U32(0), P(None)))
+        lib.wl_proxy_wrapper_destroy(wrapper)
+
+        found = {}
+        GLOBAL = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32)
+        REMOVE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32)
+        callbacks = (GLOBAL(lambda data, reg, name, iface, ver: found.__setitem__(iface.decode(), (name, ver))),
+                     REMOVE(lambda *a: None))
+        listener = (ctypes.c_void_p * 2)(*[ctypes.cast(c, ctypes.c_void_p) for c in callbacks])
+        self._keep += [callbacks, listener]
+        lib.wl_proxy_add_listener(registry, listener, P(None))
+        lib.wl_display_roundtrip_queue(self.display, queue)
+        if "ext_background_effect_manager_v1" not in found or "wl_compositor" not in found:
+            return
+
+        def bind(iface, name, version):
+            return P(lib.wl_proxy_marshal_flags(registry, U32(0), P(ctypes.addressof(iface)), U32(version), U32(0),
+                                                U32(name), ctypes.c_char_p(iface.name), U32(version), P(None)))
+        self.manager = bind(manager_if, found["ext_background_effect_manager_v1"][0], 1)
+        self.compositor = bind(wl_compositor, found["wl_compositor"][0], min(4, found["wl_compositor"][1]))
+        caps = []
+        CAPS = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32)
+        cap_cb = CAPS(lambda data, proxy, flags: caps.append(flags))
+        cap_listener = (ctypes.c_void_p * 1)(ctypes.cast(cap_cb, ctypes.c_void_p))
+        self._keep += [cap_cb, cap_listener]
+        lib.wl_proxy_add_listener(self.manager, cap_listener, P(None))
+        lib.wl_display_roundtrip_queue(self.display, queue)
+        self.ok = bool(caps and caps[0] & 1)  # bit 1 = the compositor can blur
+
+    # ---- per window
+    def _surface(self, window):
+        surface = window.get_surface()
+        if surface is None or "Wayland" not in type(surface).__name__:
+            return None
+        return self.gtk.gdk_wayland_surface_get_wl_surface(ctypes.c_void_p(hash(surface)))
+
+    def _set_region(self, effect, on):
+        P, U32, I32 = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int32
+        lib = self.lib
+        region = P(None)
+        if on:  # the whole window (the compositor clips an oversized region to the window)
+            region = P(lib.wl_proxy_marshal_flags(self.compositor, U32(1), P(ctypes.addressof(self.region_if)),
+                                                  U32(lib.wl_proxy_get_version(self.compositor)), U32(0), P(None)))
+            lib.wl_proxy_marshal_flags(region, U32(1), P(None), U32(lib.wl_proxy_get_version(region)), U32(0),
+                                       I32(0), I32(0), I32(32767), I32(32767))
+        lib.wl_proxy_marshal_flags(effect, U32(1), P(None), U32(1), U32(0), region)
+        if on:
+            lib.wl_proxy_marshal_flags(region, U32(0), P(None), U32(lib.wl_proxy_get_version(region)), U32(1))
+        lib.wl_display_flush(self.display)
+
+    def set(self, window, on):
+        """Turn the blur behind this window on or off. Safe to call any time; does nothing if unsupported."""
+        if not self.ok:
+            return
+        try:
+            surface = self._surface(window)
+            if not surface:
+                return
+            effect = self._effects.get(surface)
+            if effect is None:
+                if not on:
+                    return
+                P, U32 = ctypes.c_void_p, ctypes.c_uint32
+                effect = P(self.lib.wl_proxy_marshal_flags(self.manager, U32(1), P(ctypes.addressof(self.effect_if)), U32(1),
+                                                           U32(0), P(None), P(surface)))
+                self._effects[surface] = effect
+            self._set_region(effect, on)
+            window.queue_draw()  # the change takes effect with the window's next frame
+        except Exception:  # noqa: BLE001
+            pass
+
+    def release(self, window):
+        """Must run before the window's surface is destroyed: a leftover effect would be a fatal protocol error."""
+        if not self.ok:
+            return
+        try:
+            surface = self._surface(window)
+            effect = self._effects.pop(surface, None) if surface else None
+            if effect is not None:
+                P, U32 = ctypes.c_void_p, ctypes.c_uint32
+                self.lib.wl_proxy_marshal_flags(effect, U32(0), P(None), U32(1), U32(1))  # destroy
+                self.lib.wl_display_flush(self.display)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def error(self):
+        """0 while the connection to the compositor is healthy (used by the tests)."""
+        return self.lib.wl_display_get_error(self.display) if self.ok else 0
+
+
 class TabContainer(Gtk.Box):
     """One browser tab: a single folder pane, or two panes side by side."""
 
@@ -2088,6 +2280,7 @@ class Window(Adw.ApplicationWindow):
             self.maximize()
         self.show_hidden = bool(cfg.get("show_hidden", False))
         self.deep_search = bool(cfg.get("search_deep", True))
+        self.translucent = bool(cfg.get("translucent", True))
         saved = as_int(cfg.get("icon_size"), 72)
         self.icon_size = min(ZOOM_STEPS, key=lambda z: abs(z - saved))
         self.compress_format = cfg.get("compress_format") if cfg.get("compress_format") in ARCHIVE_FORMATS else "zip"
@@ -2124,6 +2317,9 @@ class Window(Adw.ApplicationWindow):
         self.lookup_action("sort-desc").set_state(GLib.Variant("b", self.sort_desc))
         self.sidebar_btn.set_active(bool(cfg.get("sidebar_visible", True)))
         self.update_view_button()
+        self.apply_look()
+        self.connect("map", lambda *a: WaylandBlur.get().set(self, self.translucent))
+        self.connect("unmap", lambda *a: WaylandBlur.get().release(self))  # before the surface is destroyed
         if empty:
             pass  # a tab is about to be moved in
         elif restore:
@@ -2188,6 +2384,7 @@ class Window(Adw.ApplicationWindow):
 
     def save_prefs(self):
         save_config({"view": self.view_mode, "show_hidden": self.show_hidden, "search_deep": self.deep_search, "compress_format": self.compress_format, "icon_size": self.icon_size,
+                     "translucent": self.translucent,
                      "sort": {"key": self.sort_key, "desc": self.sort_desc}})
 
     # ---- UI construction
@@ -2435,6 +2632,9 @@ class Window(Adw.ApplicationWindow):
         self.add_action(hidden)
         app.set_accels_for_action("win.show-hidden", ["<Ctrl>H"])
 
+        look = Gio.SimpleAction.new_stateful("translucent", None, GLib.Variant("b", self.translucent))
+        look.connect("activate", lambda a, p: self.set_translucent(not self.translucent))
+        self.add_action(look)
         sort = Gio.SimpleAction.new_stateful("sort", GLib.VariantType("s"), GLib.Variant("s", "name"))
         sort.connect("activate", self._on_sort)
         self.add_action(sort)
@@ -2519,6 +2719,7 @@ class Window(Adw.ApplicationWindow):
         main.append_section("Sort By", sort_menu())
         main.append_section(None, section([("Undo", "win.undo")]))
         main.append_section(None, section([("Show Hidden Files", "win.show-hidden"),
+                                           ("Translucent Blur", "win.translucent"),
                                            ("About Roost Xplorer", "win.about")]))
         self.menu_btn.set_menu_model(main)
 
@@ -3325,6 +3526,25 @@ class Window(Adw.ApplicationWindow):
             t.apply_zoom()
         if self.view_mode != "grid":
             self.toast(f"Icon size {self.icon_size}px (shown in the grid view)")
+
+    def apply_look(self):
+        if self.translucent:
+            self.add_css_class("translucent")
+        else:
+            self.remove_css_class("translucent")
+        action = self.lookup_action("translucent")
+        if action is not None:
+            action.set_state(GLib.Variant("b", self.translucent))
+        if self.get_mapped():
+            WaylandBlur.get().set(self, self.translucent)
+
+    def set_translucent(self, on):
+        self.translucent = on
+        self.save_prefs()
+        for win in self.get_application().get_windows():  # every open window changes together
+            if isinstance(win, Window):
+                win.translucent = on
+                win.apply_look()
 
     def update_view_button(self):
         grid = self.view_mode == "grid"
