@@ -2271,7 +2271,7 @@ class TabContainer(Gtk.Box):
 
 # ------------------------------------------------------------------ window
 class Window(Adw.ApplicationWindow):
-    def __init__(self, app, start, restore=False, empty=False):
+    def __init__(self, app, start, restore=False, empty=False, primary=True):
         cfg = load_config()
         win = cfg.get("window") if isinstance(cfg.get("window"), dict) else {}
         super().__init__(application=app, default_width=max(500, as_int(win.get("width"), 1120)),
@@ -2289,7 +2289,9 @@ class Window(Adw.ApplicationWindow):
         self.sort_key = sort.get("key", "name") if sort.get("key") in ("name", "modified", "size", "type") else "name"
         self.sort_desc = bool(sort.get("desc", False))
         self._session_timer = None
-        self.save_session = not empty  # windows made by pulling a tab out don't overwrite the saved session
+        # only the first window remembers the open tabs: extra windows (pulled-out tabs, new windows) must not
+        # overwrite them
+        self.save_session = primary and not empty
         self._menu_page = None
         self.cut_files = []
         self._menu_height = {}
@@ -2604,6 +2606,7 @@ class Window(Adw.ApplicationWindow):
         add("zoom-reset", lambda: self.zoom(0), ["<Ctrl>0", "<Ctrl>KP_0"])
         add("new-file", self.new_file, ["<Ctrl><Alt>N"])
         add("copy-path", self.copy_path, ["<Ctrl><Shift>C"])
+        add("new-window", self.new_window, ["<Ctrl>N"])
         add("tab-new-window", self.tab_new_window)
         add("tab-duplicate", self.tab_duplicate)
         add("tab-close-others", self.tab_close_others)
@@ -2717,7 +2720,7 @@ class Window(Adw.ApplicationWindow):
 
         main = Gio.Menu()
         main.append_section("Sort By", sort_menu())
-        main.append_section(None, section([("Undo", "win.undo")]))
+        main.append_section(None, section([("New Window", "win.new-window"), ("Undo", "win.undo")]))
         main.append_section(None, section([("Show Hidden Files", "win.show-hidden"),
                                            ("Translucent Blur", "win.translucent"),
                                            ("About Roost Xplorer", "win.about")]))
@@ -3213,6 +3216,10 @@ class Window(Adw.ApplicationWindow):
             self.schedule_session_save()
             if tabview.get_selected_page() is page:
                 self._on_tab_changed()
+
+    def new_window(self):
+        """Ctrl+N: another window, in the folder you are looking at."""
+        self.get_application().open_window(self.tab().file if self.tab() else None)
 
     def tab_new_window(self):
         page = self._menu_target()
@@ -4238,20 +4245,29 @@ class App(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-    def on_activate(self, app):
-        win = self.props.active_window
-        if win is None:
-            win = Window(self, Gio.File.new_for_path(GLib.get_home_dir()), restore=True)
+    def explorer_windows(self):
+        return [w for w in self.get_windows() if isinstance(w, Window)]
+
+    def open_window(self, folder=None):
+        """A new window. The first one restores your saved tabs; later ones start fresh and never save the session."""
+        first = not self.explorer_windows()
+        start = folder or Gio.File.new_for_path(GLib.get_home_dir())
+        win = Window(self, start, restore=first and folder is None, primary=first)
         win.present()
+        return win
+
+    def on_activate(self, app):
+        # launching the app again (app menu, Meta+E, ...) opens another window instead of just raising the old one
+        self.open_window()
 
     def on_open(self, app, files, n, hint):
-        win = self.props.active_window
+        # a folder opened from another app or the terminal gets a window of its own (several folders: one tab each)
+        win = None
         for f in files:
             if win is None:
-                win = Window(self, f)
+                win = self.open_window(f)
             else:
                 win.new_tab(f)
-        win.present()
 
 
 if __name__ == "__main__":

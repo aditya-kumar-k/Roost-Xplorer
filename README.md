@@ -160,6 +160,7 @@ Then delete the cloned folder if you like.
 
 | Action | Shortcut |
 |---|---|
+| New window | <kbd>Ctrl</kbd>+<kbd>N</kbd> (starting the app again, or <kbd>Meta</kbd>+<kbd>E</kbd>, also opens a new window) |
 | New tab / close tab | <kbd>Ctrl</kbd>+<kbd>T</kbd> / <kbd>Ctrl</kbd>+<kbd>W</kbd> |
 | Search (or just start typing) | <kbd>Ctrl</kbd>+<kbd>F</kbd> |
 | Type a path | <kbd>Ctrl</kbd>+<kbd>L</kbd> |
