@@ -167,6 +167,7 @@ Then delete the cloned folder if you like.
 | Home folder | <kbd>Alt</kbd>+<kbd>Home</kbd> |
 | Open | <kbd>Ctrl</kbd>+<kbd>O</kbd> or <kbd>Enter</kbd> |
 | Quick preview | <kbd>Space</kbd> |
+| Right-click menu from the keyboard | <kbd>Menu</kbd> key, or <kbd>Shift</kbd>+<kbd>F10</kbd> |
 | Cut / copy / paste | <kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd> |
 | Rename | <kbd>F2</kbd> |
 | Move to Trash | <kbd>Delete</kbd> |

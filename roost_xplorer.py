@@ -1225,6 +1225,7 @@ class FolderTab(Gtk.Box):
         else:
             w = Gtk.Label(xalign=0, hexpand=True, css_classes=["dim-label"], ellipsize=Pango.EllipsizeMode.END)
         li.set_child(w)
+        w._li = li  # lets the keyboard menu find out which item has focus
         self._attach_controllers(li, w)
 
     def _bind_cell(self, factory, li, kind):
@@ -1658,6 +1659,21 @@ class FolderTab(Gtk.Box):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
         self.win.popup(gesture.get_widget(), x, y, "trash" if self.file.get_uri_scheme() == "trash" else "item")
 
+    def keyboard_menu(self, focus):
+        """The Menu key (or Shift+F10): open the right-click menu for the selection, beside the focused item."""
+        li = find_list_item(focus) if is_inside(focus, self.stack) else None
+        if li is not None:
+            pos = li.get_position()
+            if pos != Gtk.INVALID_LIST_POSITION and not self.sel.is_selected(pos):
+                self.sel.select_item(pos, True)  # like a right-click: the item you are on is the one acted on
+        selected = self.sel.get_selection().get_size() > 0
+        trash = self.file.get_uri_scheme() == "trash"
+        kind = ("trash" if trash else "item") if selected else ("trash-bg" if trash else "bg")
+        if li is not None and selected:
+            self.win.popup(focus, focus.get_width() / 2, focus.get_height() / 2, kind)
+        else:
+            self.win.popup(self.stack, 60, 60, kind)
+
     def _on_bg_double_click(self, gesture, n, x, y):
         # only the view background counts, not items, column headers or scrollbars
         w = self.stack.pick(x, y, Gtk.PickFlags.DEFAULT)
@@ -1715,6 +1731,30 @@ def looks_like_text(path):
     except UnicodeDecodeError:
         return False
     return True
+
+
+def find_list_item(widget):
+    """The list item behind a widget (or one of its descendants), if it is a cell of the file view."""
+    if widget is None:
+        return None
+    li = getattr(widget, "_li", None)
+    if li is not None:
+        return li
+    child = widget.get_first_child()
+    while child is not None:
+        found = find_list_item(child)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+def is_inside(widget, ancestor):
+    while widget is not None:
+        if widget is ancestor:
+            return True
+        widget = widget.get_parent()
+    return False
 
 
 def preview_kind(info, path):
@@ -3131,7 +3171,15 @@ class Window(Adw.ApplicationWindow):
         PreviewDialog(self, tab, bs.get_nth(0)).present(self)
 
     def _on_window_key(self, ctrl, keyval, keycode, state):
-        """Space previews the selected file, unless you are typing somewhere or a dialog is open."""
+        """Space previews the selected file; the Menu key (or Shift+F10) opens the right-click menu.
+        Neither applies while you are typing somewhere or a dialog is open."""
+        menu_keys = (Gdk.KEY_Menu, getattr(Gdk, "KEY_MenuKB", Gdk.KEY_Menu))
+        shift_f10 = keyval == Gdk.KEY_F10 and state & Gdk.ModifierType.SHIFT_MASK and not state & (
+            Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK)
+        if keyval in menu_keys or shift_f10:
+            if self.get_visible_dialog() is not None or isinstance(self.get_focus(), Gtk.Editable):
+                return False
+            return self.keyboard_menu()
         if keyval != Gdk.KEY_space or state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
                                                 | Gdk.ModifierType.SHIFT_MASK):
             return False
@@ -3140,6 +3188,22 @@ class Window(Adw.ApplicationWindow):
         if not self.acts["preview"].get_enabled():
             return False
         self.preview()
+        return True
+
+    def keyboard_menu(self):
+        focus = self.get_focus()
+        if is_inside(focus, self.side_list):  # in the sidebar: the menu of the focused entry
+            row = focus
+            while row is not None and not isinstance(row, Gtk.ListBoxRow):
+                row = row.get_parent()
+            if row is not None and (row.loc is not None or row.volume is not None):
+                self._on_side_menu(None, 1, row.get_width() / 2, row.get_height() / 2, row)
+                return True
+            return False
+        tab = self.tab()
+        if tab is None:
+            return False
+        tab.keyboard_menu(focus)
         return True
 
     def compress(self):
