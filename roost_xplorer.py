@@ -2387,6 +2387,51 @@ class WaylandBlur:
         return self.lib.wl_display_get_error(self.display) if self.ok else 0
 
 
+class MenuStyle:
+    """Right-click and drop-down menus follow the system's menu transparency (KDE: System Settings > Breeze >
+    Transparency) the way Dolphin's do, and get the same frosted blur behind them."""
+
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.opacity = 1.0
+        self.provider = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.provider,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.path = os.path.join(GLib.get_user_config_dir(), "breezerc")
+        self.reload()
+        try:
+            self.monitor = Gio.File.new_for_path(self.path).monitor_file(Gio.FileMonitorFlags.NONE, None)
+            self.monitor.connect("changed", lambda *a: GLib.timeout_add(200, lambda: (self.reload(), False)[1]))
+        except GLib.Error:
+            self.monitor = None
+
+    def reload(self):
+        opacity = 100
+        kf = GLib.KeyFile()
+        try:
+            kf.load_from_file(self.path, GLib.KeyFileFlags.NONE)
+            opacity = kf.get_integer("Style", "MenuOpacity")
+        except GLib.Error:
+            pass
+        self.opacity = max(0.0, min(1.0, opacity / 100))
+        if self.opacity >= 1.0:
+            self.provider.load_from_string("")
+        else:
+            self.provider.load_from_string(f"popover {{ --popover-bg-color: rgba(22, 22, 26, {self.opacity:.2f}); }}")
+
+    def attach(self, pop):
+        """Blur behind this menu while it is open (only when the system asks for transparent menus)."""
+        pop.connect("map", lambda p: WaylandBlur.get().set(p, self.opacity < 1.0))
+        pop.connect("closed", lambda p: WaylandBlur.get().release(p))
+
+
 class TabContainer(Gtk.Box):
     """One browser tab: a single folder pane, or two panes side by side."""
 
@@ -2910,6 +2955,7 @@ class Window(Adw.ApplicationWindow):
                                            ("Translucent Blur", "win.translucent"),
                                            ("About Roost Xplorer", "win.about")]))
         self.menu_btn.set_menu_model(main)
+        MenuStyle.get().attach(self.menu_btn.get_popover())
 
     # ---- sidebar
     # ---- favorites
@@ -3053,6 +3099,7 @@ class Window(Adw.ApplicationWindow):
         rect = Gdk.Rectangle()
         rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
         pop.set_pointing_to(rect)
+        MenuStyle.get().attach(pop)
         pop.connect("closed", lambda p: GLib.idle_add(p.unparent))
         pop.popup()
 
@@ -3991,6 +4038,7 @@ class Window(Adw.ApplicationWindow):
             GLib.idle_add(lambda: self._menu_height.__setitem__(kind, p.get_height()) and False)
 
         pop.connect("map", remember)
+        MenuStyle.get().attach(pop)
         pop.connect("closed", lambda p: GLib.idle_add(p.unparent))
         pop.popup()
 
