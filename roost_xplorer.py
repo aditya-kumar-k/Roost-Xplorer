@@ -2676,6 +2676,9 @@ class Window(Adw.ApplicationWindow):
         self.fwd_btn = Gtk.Button(icon_name="go-next-symbolic", action_name="win.forward", tooltip_text="Forward (Alt+→)")
         nav.append(self.back_btn)
         nav.append(self.fwd_btn)
+        self.refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", action_name="win.refresh",
+                                      tooltip_text="Refresh (Ctrl+R)")
+        nav.append(self.refresh_btn)
         header.pack_start(nav)
 
         self.crumbs = Gtk.Box(spacing=0, valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
@@ -2821,6 +2824,7 @@ class Window(Adw.ApplicationWindow):
 
         add("back", lambda: self.tab().back(), ["<Alt>Left"])
         add("forward", lambda: self.tab().forward(), ["<Alt>Right"])
+        add("refresh", lambda: self.tab().dirlist.resync(), ["<Control>r"])
         add("up", lambda: self.tab().up(), ["<Alt>Up", "BackSpace"])
         add("home", lambda: self.go(Gio.File.new_for_path(GLib.get_home_dir())), ["<Alt>Home"])
         add("location", self.focus_location, ["<Ctrl>L"])
