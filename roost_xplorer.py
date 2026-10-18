@@ -116,7 +116,10 @@ gridview > child, columnview row, .navigation-sidebar row, headerbar button, .cr
 progressbar.disk-usage trough { min-height: 4px; border-radius: 2px; background-color: alpha(white, 0.14); }
 progressbar.disk-usage progress { min-height: 4px; border-radius: 2px; background-color: @accent_bg_color; }
 progressbar.disk-usage.full progress { background-color: #e5484d; }
-.brand-title { color: @accent_color; letter-spacing: 2px; font-weight: 800; }
+/* smaller header buttons */
+button.slim { min-height: 24px; min-width: 26px; padding: 0 5px; }
+button.slim image { -gtk-icon-size: 14px; }
+window.sidebar-hidden .status-bar { padding-left: 42px; }
 headerbar { box-shadow: inset 0 -1px alpha(@accent_bg_color, 0.35); }
 
 /* ---- window buttons: flat, full-height, flush with the corner (Fitts's law: slam the mouse into the corner) ---- */
@@ -2678,14 +2681,17 @@ class Window(Adw.ApplicationWindow):
         # header
         header = Adw.HeaderBar(show_start_title_buttons=False)
         self.sidebar_btn = Gtk.ToggleButton(icon_name="sidebar-show-symbolic", tooltip_text="Sidebar (F9)", active=True)
-        header.pack_start(self.sidebar_btn)
-        nav = Gtk.Box(css_classes=["linked"])
-        self.back_btn = Gtk.Button(icon_name="go-previous-symbolic", action_name="win.back", tooltip_text="Back (Alt+←)")
-        self.fwd_btn = Gtk.Button(icon_name="go-next-symbolic", action_name="win.forward", tooltip_text="Forward (Alt+→)")
+        self.sidebar_btn.add_css_class("flat")
+        self.sidebar_btn.add_css_class("slim")
+        nav = Gtk.Box(css_classes=["linked", "compact-nav"])
+        self.back_btn = Gtk.Button(icon_name="go-previous-symbolic", action_name="win.back", tooltip_text="Back (Alt+←)",
+                                   css_classes=["slim"])
+        self.fwd_btn = Gtk.Button(icon_name="go-next-symbolic", action_name="win.forward", tooltip_text="Forward (Alt+→)",
+                                  css_classes=["slim"])
         nav.append(self.back_btn)
         nav.append(self.fwd_btn)
         self.refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", action_name="win.refresh",
-                                      tooltip_text="Refresh (Ctrl+R)")
+                                      tooltip_text="Refresh (Ctrl+R)", css_classes=["slim"])
         nav.append(self.refresh_btn)
         header.pack_start(nav)
 
@@ -2708,15 +2714,15 @@ class Window(Adw.ApplicationWindow):
         self.loc_stack.add_named(self.loc_entry, "entry")
         header.set_title_widget(Adw.Clamp(child=self.loc_stack, maximum_size=760, tightening_threshold=600))
 
-        self.menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", primary=True, tooltip_text="Main Menu")
+        self.menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", primary=True, tooltip_text="Main Menu", css_classes=["slim"])
         header.pack_end(self.menu_btn)
-        self.view_btn = Gtk.Button(action_name="win.toggle-view", tooltip_text="Switch View")
+        self.view_btn = Gtk.Button(action_name="win.toggle-view", tooltip_text="Switch View", css_classes=["slim"])
         header.pack_end(self.view_btn)
         self.restore_btn = Gtk.Button(label="Restore", action_name="win.restore", visible=False)
         self.trash_btn = Gtk.Button(label="Empty Trash", action_name="win.empty-trash", visible=False,
                                     css_classes=["destructive-action"])
         header.pack_end(Gtk.Button(icon_name="view-dual-symbolic", action_name="win.toggle-split",
-                                   tooltip_text="Split View (F3)"))
+                                   tooltip_text="Split View (F3)", css_classes=["slim"]))
         header.pack_end(self.trash_btn)
         header.pack_end(self.restore_btn)
 
@@ -2733,7 +2739,8 @@ class Window(Adw.ApplicationWindow):
         self.ops_list.set_size_request(320, -1)
         self.ops_btn.set_popover(Gtk.Popover(child=self.ops_list))
         header.pack_end(self.ops_btn)
-        self.search_btn = Gtk.ToggleButton(icon_name="system-search-symbolic", tooltip_text="Search (Ctrl+F)")
+        self.search_btn = Gtk.ToggleButton(icon_name="system-search-symbolic", tooltip_text="Search (Ctrl+F)",
+                                           css_classes=["slim"])
         header.pack_end(self.search_btn)
 
         # search bar
@@ -2755,8 +2762,6 @@ class Window(Adw.ApplicationWindow):
         self.search_btn.bind_property("active", self.searchbar, "search-mode-enabled",
                                       GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
 
-        content = Adw.ToolbarView()
-        content.add_top_bar(header)
         self.toasts = Adw.ToastOverlay(child=self.tabview, vexpand=True)
         # tab bar and search bar live in the content, not in the top-bar group: sharing the group
         # pads the header bar by a few pixels and keeps the window buttons off the top edge
@@ -2764,7 +2769,7 @@ class Window(Adw.ApplicationWindow):
         body.append(self.tabbar)
         body.append(self.searchbar)
         body.append(self.toasts)
-        content.set_content(body)
+        content = body
 
         # sidebar
         self.side_list = Gtk.ListBox(css_classes=["navigation-sidebar"])
@@ -2786,14 +2791,8 @@ class Window(Adw.ApplicationWindow):
         self._drop_header = None
         self._fav_mark_row = None
         side = Adw.ToolbarView()
-        brand = Gtk.Box(spacing=8)
-        logo = LOGO
-        if os.path.exists(logo):
-            brand.append(Gtk.Image(file=logo, pixel_size=34))
-        brand.append(Gtk.Label(label="ROOST", css_classes=["brand-title"]))
-        side.add_top_bar(Adw.HeaderBar(title_widget=brand, show_start_title_buttons=False,
-                                         show_end_title_buttons=False))
-        side.set_content(Gtk.ScrolledWindow(child=self.side_list, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        side.set_content(Gtk.ScrolledWindow(child=self.side_list, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                            margin_bottom=34))  # room for the sidebar button in the corner
 
         side.set_size_request(170, -1)
         self.split = Gtk.Paned(start_child=side, end_child=content, resize_start_child=False,
@@ -2802,7 +2801,19 @@ class Window(Adw.ApplicationWindow):
         self.sidebar_btn.bind_property("active", side, "visible",
                                        GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
         self.connect("close-request", self._save_config)
-        self.set_content(self.split)
+        # the sidebar button sits in the bottom-left corner, over the sidebar (or over the content when the sidebar is hidden)
+        self.sidebar_btn.set_halign(Gtk.Align.START)
+        self.sidebar_btn.set_valign(Gtk.Align.END)
+        self.sidebar_btn.set_margin_start(4)
+        self.sidebar_btn.set_margin_bottom(4)
+        self.sidebar_btn.connect("toggled", lambda b: (self.remove_css_class("sidebar-hidden") if b.get_active()
+                                                       else self.add_css_class("sidebar-hidden")))
+        overlay = Gtk.Overlay(child=self.split)
+        overlay.add_overlay(self.sidebar_btn)
+        outer = Adw.ToolbarView()
+        outer.add_top_bar(header)  # one header across the whole window: back / forward / refresh are at the far left
+        outer.set_content(overlay)
+        self.set_content(outer)
 
     def _save_config(self, *a):
         if not self.save_session:
