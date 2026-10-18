@@ -158,7 +158,11 @@ window.translucent {
   --headerbar-backdrop-color: rgba(14, 14, 16, 0.38);
   --sidebar-bg-color: rgba(15, 15, 18, 0.28);
   --sidebar-backdrop-color: rgba(12, 12, 14, 0.28);
+  background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.015) 38%,
+                                    rgba(90, 140, 190, 0.04) 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.24);
 }
+window.translucent.maximized, window.translucent.fullscreen { box-shadow: none; }
 """
 
 THUMB_CACHE = {}
@@ -2574,7 +2578,7 @@ class Window(Adw.ApplicationWindow):
         self.update_view_button()
         self.apply_look()
         self.connect("notify::is-active", lambda *a: self.is_active() and self.resync_folders())
-        self.connect("map", lambda *a: WaylandBlur.get().set(self, self.translucent))
+        self.connect("map", self._on_blur_map)
         self.connect("unmap", lambda *a: WaylandBlur.get().release(self))  # before the surface is destroyed
         if empty:
             pass  # a tab is about to be moved in
@@ -3823,7 +3827,40 @@ class Window(Adw.ApplicationWindow):
         if action is not None:
             action.set_state(GLib.Variant("b", self.translucent))
         if self.get_mapped():
-            WaylandBlur.get().set(self, self.translucent)
+            self.update_blur()
+
+    def _on_blur_map(self, *a):
+        self.update_blur()
+        surface = self.get_surface()
+        if surface is not None:  # keep the blur's rounded corners matched to the window as it is resized
+            for prop in ("notify::width", "notify::height"):
+                surface.connect(prop, self._queue_blur_update)
+        for prop in ("notify::maximized", "notify::fullscreened"):
+            self.connect(prop, self._queue_blur_update)
+
+    def _queue_blur_update(self, *a):
+        if not getattr(self, "_blur_pending", False):
+            self._blur_pending = True
+            GLib.idle_add(self._run_blur_update)
+
+    def _run_blur_update(self):
+        self._blur_pending = False
+        if self.get_mapped():
+            self.update_blur()
+        return False
+
+    def update_blur(self):
+        """Blur behind the window, cut to its rounded corners (square when maximized, where there are none)."""
+        blur = WaylandBlur.get()
+        if not self.translucent:
+            blur.set(self, False)
+            return
+        shape = None
+        w, h = self.get_width(), self.get_height()
+        if w > 0 and h > 0 and not (self.is_maximized() or self.is_fullscreen()):
+            dx, dy = self.get_surface_transform()
+            shape = (int(dx), int(dy), w, h, 15)
+        blur.set(self, True, shape)
 
     def set_translucent(self, on):
         self.translucent = on
