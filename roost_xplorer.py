@@ -3051,7 +3051,7 @@ class Window(Adw.ApplicationWindow):
             return
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         if separate:
-            box.append(Gtk.Separator(margin_top=6, margin_bottom=6))
+            box.append(Gtk.Box(margin_top=6, margin_bottom=6))  # a gap between sections, no line
         if title:
             box.append(Gtk.Label(label=title.upper(), xalign=0, margin_start=12, margin_top=4, margin_bottom=2,
                                  css_classes=["caption-heading", "dim-label"]))
