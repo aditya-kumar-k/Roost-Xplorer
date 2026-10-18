@@ -2556,6 +2556,10 @@ class Window(Adw.ApplicationWindow):
         labels, favs = cfg.get("labels"), cfg.get("favorites")
         self.labels = {k: v for k, v in labels.items() if isinstance(v, str)} if isinstance(labels, dict) else {}
         self.favorites = [u for u in favs if isinstance(u, str)] if isinstance(favs, list) else []
+        collapsed = cfg.get("sidebar_collapsed")
+        self.side_collapsed = {"places": True, "devices": False}  # the system folders start folded away
+        if isinstance(collapsed, dict):
+            self.side_collapsed.update({k: bool(v) for k, v in collapsed.items() if k in self.side_collapsed})
         self._ctx_row = None
         self.job_rows = {}
         self.undo_stack = []
@@ -2765,6 +2769,7 @@ class Window(Adw.ApplicationWindow):
         # sidebar
         self.side_list = Gtk.ListBox(css_classes=["navigation-sidebar"])
         self.side_list.set_header_func(self._side_header)
+        self.side_list.set_filter_func(lambda row: not self.side_collapsed.get(getattr(row, "group", None), False))
         self.side_list.connect("row-activated", self._on_side_activated)
         # Drops are handled by the list itself, which works out the row under the pointer. (Drop targets
         # on the individual rows never receive the drag.)
@@ -3057,8 +3062,29 @@ class Window(Adw.ApplicationWindow):
                                  css_classes=["caption-heading", "dim-label"]))
         row.set_header(box)
 
+    def _group_row(self, title, group, section):
+        """A heading that folds its group of sidebar rows away (the system folders, the disks)."""
+        arrow = Gtk.Image(icon_name="pan-down-symbolic" if not self.side_collapsed[group] else "pan-end-symbolic",
+                          css_classes=["dim-label"])
+        box = Gtk.Box(margin_start=12, margin_end=12, margin_top=6, margin_bottom=2)
+        box.append(Gtk.Label(label=title.upper(), xalign=0, hexpand=True, css_classes=["caption-heading", "dim-label"]))
+        box.append(arrow)
+        row = Gtk.ListBoxRow(child=box, selectable=False, tooltip_text="Show or hide")
+        row.section, row.loc, row.volume, row.key, row.mount = section, None, None, None, None
+        row.default_label = row.shown_label = ""
+        row.fav, row.header_text, row.usage_bar, row.group = False, None, None, None
+        row.toggle_group, row.arrow = group, arrow
+        self.side_list.append(row)
+
+    def _toggle_group(self, row):
+        group = row.toggle_group
+        self.side_collapsed[group] = not self.side_collapsed[group]
+        row.arrow.set_from_icon_name("pan-end-symbolic" if self.side_collapsed[group] else "pan-down-symbolic")
+        self.side_list.invalidate_filter()
+        save_config({"sidebar_collapsed": self.side_collapsed})
+
     def _side_row(self, icon, label, section, file=None, volume=None, key=None, mount=None, fav=False, header=None,
-                  usage=False):
+                  usage=False, group=None):
         shown = self.labels.get(key, label) if key else label
         box = Gtk.Box(spacing=12, margin_top=4, margin_bottom=4)
         if isinstance(icon, str):
@@ -3084,6 +3110,7 @@ class Window(Adw.ApplicationWindow):
         row.section, row.loc, row.volume, row.key, row.mount = section, file, volume, key, mount
         row.default_label, row.shown_label = label, shown
         row.fav, row.header_text = fav, header
+        row.group = group
         if fav and file is not None and not file.query_exists(None):
             box.set_opacity(0.5)
         if key:  # disks: show the real name and location on hover, so renamed labels stay identifiable
@@ -3326,7 +3353,8 @@ class Window(Adw.ApplicationWindow):
     def rebuild_sidebar(self):
         self.side_list.remove_all()
         home = GLib.get_home_dir()
-        self._side_row("user-home-symbolic", "Home", 0, Gio.File.new_for_path(home))
+        self._group_row("Places", "places", 0)
+        self._side_row("user-home-symbolic", "Home", 0, Gio.File.new_for_path(home), group="places")
         places = [
             (GLib.UserDirectory.DIRECTORY_DESKTOP, "user-desktop-symbolic", "Desktop"),
             (GLib.UserDirectory.DIRECTORY_DOCUMENTS, "folder-documents-symbolic", "Documents"),
@@ -3338,17 +3366,19 @@ class Window(Adw.ApplicationWindow):
         for d, icon, label in places:
             p = GLib.get_user_special_dir(d)
             if p and p != home and os.path.isdir(p):
-                self._side_row(icon, label, 0, Gio.File.new_for_path(p))
+                self._side_row(icon, label, 0, Gio.File.new_for_path(p), group="places")
         self._add_favorite_rows()
         self._side_row("user-trash-symbolic", "Trash", 2, Gio.File.new_for_uri("trash:///"))
-        self._side_row("drive-harddisk-symbolic", "Computer", 3, Gio.File.new_for_path("/"), key="path:/", usage=True)
+        self._group_row("Devices", "devices", 3)
+        self._side_row("drive-harddisk-symbolic", "Computer", 3, Gio.File.new_for_path("/"), key="path:/", usage=True,
+                       group="devices")
         for mount in self.vm.get_mounts():
             if not mount.is_shadowed():
                 self._side_row(mount.get_symbolic_icon(), mount.get_name(), 3, mount.get_root(),
-                               key=disk_key(mount, mount.get_root()), mount=mount, usage=True)
+                               key=disk_key(mount, mount.get_root()), mount=mount, usage=True, group="devices")
         for vol in self.vm.get_volumes():
             if vol.get_mount() is None and vol.can_mount():
-                self._side_row(vol.get_symbolic_icon(), vol.get_name(), 3, None, vol, key=disk_key(vol))
+                self._side_row(vol.get_symbolic_icon(), vol.get_name(), 3, None, vol, key=disk_key(vol), group="devices")
         self.sync_sidebar()
         self.refresh_disk_usage()
 
@@ -3400,6 +3430,9 @@ class Window(Adw.ApplicationWindow):
             self.side_list.select_row(best)
 
     def _on_side_activated(self, lb, row):
+        if getattr(row, "toggle_group", None):
+            self._toggle_group(row)
+            return
         if row.volume is not None:
             self.mount_volume(row.volume, row.shown_label)
         elif row.loc is not None:
