@@ -3071,6 +3071,7 @@ class Window(Adw.ApplicationWindow):
                                            ("Translucent Blur", "win.translucent"),
                                            ("About Roost Xplorer", "win.about")]))
         self.menu_btn.set_menu_model(main)
+        self.menu_btn.get_popover().set_has_arrow(False)  # like the right-click menus (and keeps the blur lined up)
         MenuStyle.get().attach(self.menu_btn.get_popover())
 
     # ---- sidebar
