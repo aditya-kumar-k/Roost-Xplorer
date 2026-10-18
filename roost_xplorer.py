@@ -2557,7 +2557,7 @@ class Window(Adw.ApplicationWindow):
         self.labels = {k: v for k, v in labels.items() if isinstance(v, str)} if isinstance(labels, dict) else {}
         self.favorites = [u for u in favs if isinstance(u, str)] if isinstance(favs, list) else []
         collapsed = cfg.get("sidebar_collapsed")
-        self.side_collapsed = {"places": True, "devices": False}  # the system folders start folded away
+        self.side_collapsed = {"places": True, "favorites": False, "devices": False}  # the system folders start folded away
         if isinstance(collapsed, dict):
             self.side_collapsed.update({k: bool(v) for k, v in collapsed.items() if k in self.side_collapsed})
         self._ctx_row = None
@@ -2999,19 +2999,20 @@ class Window(Adw.ApplicationWindow):
     # ---- sidebar
     # ---- favorites
     def _add_favorite_rows(self):
+        self._group_row("Favorites", "favorites", 1)
         if not self.favorites:
             row = Gtk.ListBoxRow(activatable=False, selectable=False,
                                  child=Gtk.Label(label="Right-click a folder and choose “Add to Favorites”", wrap=True,
                                                  xalign=0, margin_top=6, margin_bottom=6, css_classes=["dim-label", "caption"]))
             row.section, row.loc, row.volume, row.key, row.mount = 1, None, None, None, None
             row.default_label = row.shown_label = ""
-            row.fav, row.header_text = False, "Favorites"
+            row.fav, row.header_text, row.group, row.is_hint = False, None, "favorites", True
             self.side_list.append(row)
             return
         for n, uri in enumerate(self.favorites):
             f = Gio.File.new_for_uri(uri)
             self._side_row("folder-symbolic", display_name(f), 1, f, key="fav:" + uri, fav=True,
-                           header="Favorites" if n == 0 else None)
+                           group="favorites")
 
     def is_favorite(self, file):
         return file.get_uri() in self.favorites
@@ -3171,17 +3172,13 @@ class Window(Adw.ApplicationWindow):
     def _over_favorites_heading(self, y):
         """The widget (heading, or the hint row when there are no favorites yet) that adds a favorite when dropped on."""
         for row in iter_children(self.side_list):
-            if not isinstance(row, Gtk.ListBoxRow) or getattr(row, "header_text", None) != "Favorites":
+            if not isinstance(row, Gtk.ListBoxRow):
                 continue
-            if not row.fav:  # the "right-click a folder…" hint shown while the list is empty
+            # the Favorites heading, or the "right-click a folder…" hint shown while the list is empty
+            if getattr(row, "toggle_group", None) == "favorites" or getattr(row, "is_hint", False):
                 ok, b = row.compute_bounds(self.side_list)
-                if ok and b.get_y() <= y <= b.get_y() + b.get_height():
+                if ok and row.get_child_visible() and b.get_y() <= y <= b.get_y() + b.get_height():
                     return row
-            header = row.get_header()
-            if header is not None:
-                ok, b = header.compute_bounds(self.side_list)
-                if ok and b.get_y() <= y <= b.get_y() + b.get_height():
-                    return header
         return None
 
     def _side_drop_highlight(self, row, header=None):
@@ -3238,7 +3235,7 @@ class Window(Adw.ApplicationWindow):
     # ---- reordering favorites by dragging
     def _fav_slot(self, y):
         """Where a dragged favorite would land: (index among favorites, row to draw the line at, line goes below it)."""
-        rows = [r for r in iter_children(self.side_list) if isinstance(r, Gtk.ListBoxRow) and r.fav]
+        rows = [r for r in iter_children(self.side_list) if isinstance(r, Gtk.ListBoxRow) and r.fav and r.get_child_visible()]
         if not rows:
             return None
         first, last = rows[0].compute_bounds(self.side_list)[1], rows[-1].compute_bounds(self.side_list)[1]
