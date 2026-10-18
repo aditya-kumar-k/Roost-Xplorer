@@ -2514,9 +2514,9 @@ class MenuStyle:
             ok, bounds = child.compute_bounds(p) if child is not None else (False, None)
             if not ok or not p.get_mapped():
                 return False
-            dx, dy = p.get_surface_transform()
-            WaylandBlur.get().set(p, True, (int(dx + bounds.get_x()), int(dy + bounds.get_y()),
-                                            int(bounds.get_width()), int(bounds.get_height()), 12))
+            # KDE measures the region from the menu's own corner (the shadow around it doesn't count), so the
+            # region starts at 0,0 and is only as big as the menu
+            WaylandBlur.get().set(p, True, (0, 0, int(bounds.get_width()), int(bounds.get_height()), 12))
             return False
 
         pop.connect("map", lambda p: self.opacity < 1.0 and GLib.idle_add(shape_blur, p))
