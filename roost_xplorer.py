@@ -2246,7 +2246,9 @@ class WaylandBlur:
 
     def __init__(self):
         self.ok = False
+        self.can_decorate = False  # KDE's "let the desktop draw the title bar" protocol is available
         self._effects = {}  # wl_surface address -> effect proxy
+        self._decos = {}    # wl_surface address -> [decoration proxy, modes reported so far]
         self._keep = []     # ctypes objects that must outlive the calls into libwayland
         try:
             self._connect()
@@ -2316,6 +2318,18 @@ class WaylandBlur:
         self._keep += [callbacks, listener]
         lib.wl_proxy_add_listener(registry, listener, P(None))
         lib.wl_display_roundtrip_queue(self.display, queue)
+        self.queue = queue
+        if "org_kde_kwin_server_decoration_manager" in found:
+            self.deco_if = self._interface("org_kde_kwin_server_decoration",
+                                           [("release", "", []), ("request_mode", "u", [None])], [("mode", "u", [None])])
+            deco_manager_if = self._interface("org_kde_kwin_server_decoration_manager",
+                                              [("create", "no", [self.deco_if, wl_surface])],
+                                              [("default_mode", "u", [None])])
+            self.deco_manager = P(lib.wl_proxy_marshal_flags(
+                registry, U32(0), P(ctypes.addressof(deco_manager_if)), U32(1), U32(0),
+                U32(found["org_kde_kwin_server_decoration_manager"][0]), ctypes.c_char_p(deco_manager_if.name),
+                U32(1), P(None)))
+            self.can_decorate = True
         if "ext_background_effect_manager_v1" not in found or "wl_compositor" not in found:
             return
 
@@ -2384,6 +2398,44 @@ class WaylandBlur:
                 self._effects[surface] = effect
             self._set_region(effect, on, shape)
             window.queue_draw()  # the change takes effect with the window's next frame
+        except Exception:  # noqa: BLE001
+            pass
+
+    def server_decoration(self, window):
+        """Ask the desktop to draw this window's title bar and buttons itself (with the user's Window Decoration
+        theme). Returns True if the desktop agreed. Call after the window is realized, before it is shown."""
+        if not self.can_decorate:
+            return False
+        try:
+            surface = self._surface(window)
+            if not surface or surface in self._decos:
+                return False
+            P, U32 = ctypes.c_void_p, ctypes.c_uint32
+            deco = P(self.lib.wl_proxy_marshal_flags(self.deco_manager, U32(0), P(ctypes.addressof(self.deco_if)),
+                                                     U32(1), U32(0), P(None), P(surface)))
+            modes = []
+            MODE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32)
+            cb = MODE(lambda data, proxy, mode: modes.append(mode))
+            listener = (ctypes.c_void_p * 1)(ctypes.cast(cb, ctypes.c_void_p))
+            self._keep += [cb, listener]
+            self.lib.wl_proxy_add_listener(deco, listener, P(None))
+            self._decos[surface] = [deco, modes]
+            self.lib.wl_proxy_marshal_flags(deco, U32(1), P(None), U32(1), U32(0), U32(2))  # 2 = server side
+            self.lib.wl_display_roundtrip_queue(self.display, self.queue)
+            return bool(modes) and modes[-1] == 2
+        except Exception:  # noqa: BLE001
+            return False
+
+    def release_decoration(self, window):
+        if not self.can_decorate:
+            return
+        try:
+            surface = self._surface(window)
+            entry = self._decos.pop(surface, None) if surface else None
+            if entry is not None:
+                P, U32 = ctypes.c_void_p, ctypes.c_uint32
+                self.lib.wl_proxy_marshal_flags(entry[0], U32(0), P(None), U32(1), U32(1))  # release (destroys it)
+                self.lib.wl_display_flush(self.display)
         except Exception:  # noqa: BLE001
             pass
 
@@ -2541,6 +2593,12 @@ class Window(Adw.ApplicationWindow):
         self.show_hidden = bool(cfg.get("show_hidden", False))
         self.deep_search = bool(cfg.get("search_deep", True))
         self.translucent = bool(cfg.get("translucent", True))
+        # On KDE the desktop draws the title bar and buttons with the user's Window Decoration theme; GTK's own
+        # buttons are only used where that isn't offered (or if the desktop declines).
+        self.ssd = WaylandBlur.get().can_decorate
+        if self.ssd:
+            self.set_decorated(False)
+            self.connect("realize", self._on_realize_decoration)
         saved = as_int(cfg.get("icon_size"), 72)
         self.icon_size = min(ZOOM_STEPS, key=lambda z: abs(z - saved))
         self.compress_format = cfg.get("compress_format") if cfg.get("compress_format") in ARCHIVE_FORMATS else "zip"
@@ -2586,7 +2644,8 @@ class Window(Adw.ApplicationWindow):
         self.apply_look()
         self.connect("notify::is-active", lambda *a: self.is_active() and self.resync_folders())
         self.connect("map", self._on_blur_map)
-        self.connect("unmap", lambda *a: WaylandBlur.get().release(self))  # before the surface is destroyed
+        self.connect("unmap", lambda *a: (WaylandBlur.get().release(self), WaylandBlur.get().release_decoration(self)))
+        # (both are released before the surface is destroyed)
         if empty:
             pass  # a tab is about to be moved in
         elif restore:
@@ -2679,7 +2738,8 @@ class Window(Adw.ApplicationWindow):
         self.tabbar.set_end_action_widget(newtab)
 
         # header
-        header = Adw.HeaderBar(show_start_title_buttons=False)
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=not self.ssd)
+        self.header = header
         self.sidebar_btn = Gtk.ToggleButton(icon_name="sidebar-show-symbolic", tooltip_text="Sidebar (F9)", active=True)
         self.sidebar_btn.add_css_class("flat")
         self.sidebar_btn.add_css_class("slim")
@@ -3870,6 +3930,12 @@ class Window(Adw.ApplicationWindow):
         if self.get_mapped():
             self.update_blur()
 
+    def _on_realize_decoration(self, *a):
+        if not WaylandBlur.get().server_decoration(self):  # the desktop said no: use our own title bar buttons
+            self.ssd = False
+            self.set_decorated(True)
+            self.header.set_show_end_title_buttons(True)
+
     def _on_blur_map(self, *a):
         self.update_blur()
         surface = self.get_surface()
@@ -3898,7 +3964,7 @@ class Window(Adw.ApplicationWindow):
             return
         shape = None
         w, h = self.get_width(), self.get_height()
-        if w > 0 and h > 0 and not (self.is_maximized() or self.is_fullscreen()):
+        if w > 0 and h > 0 and not self.ssd and not (self.is_maximized() or self.is_fullscreen()):
             dx, dy = self.get_surface_transform()
             shape = (int(dx), int(dy), w, h, 15)
         blur.set(self, True, shape)
