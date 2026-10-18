@@ -119,6 +119,12 @@ progressbar.disk-usage.full progress { background-color: #e5484d; }
 /* smaller header buttons */
 button.slim { min-height: 24px; min-width: 26px; padding: 0 5px; }
 button.slim image { -gtk-icon-size: 14px; }
+/* flat header buttons: no background until hovered, pressed or switched on */
+headerbar button.slim, headerbar .compact-nav button { background: transparent; box-shadow: none; }
+headerbar button.slim:hover, headerbar .compact-nav button:hover { background-color: alpha(@accent_bg_color, 0.22); }
+headerbar button.slim:active, headerbar .compact-nav button:active { background-color: alpha(@accent_bg_color, 0.35); }
+headerbar button.slim:checked { background-color: alpha(@accent_bg_color, 0.3); }
+headerbar button.slim:disabled, headerbar .compact-nav button:disabled { background: transparent; }
 window.sidebar-hidden .status-bar { padding-left: 42px; }
 headerbar { box-shadow: inset 0 -1px alpha(@accent_bg_color, 0.35); min-height: 34px; }
 
