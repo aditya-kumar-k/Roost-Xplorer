@@ -100,7 +100,7 @@ columnview row:selected, listview row:selected, .navigation-sidebar row:selected
 .folder-icon { filter: grayscale(1) brightness(1.1) contrast(0.95); }
 
 .status-bar { padding: 5px 14px; font-size: 0.85em; opacity: 0.7; }
-.crumb { padding: 2px 10px; min-height: 28px; border-radius: 8px; }
+.crumb { padding: 0 10px; min-height: 24px; border-radius: 8px; }
 .crumb-current { font-weight: bold; color: @accent_color; }
 .crumb-sep { opacity: 0.4; color: @accent_color; }
 .pane-title { padding: 6px 14px 2px 14px; }
@@ -120,16 +120,16 @@ progressbar.disk-usage.full progress { background-color: #e5484d; }
 button.slim { min-height: 24px; min-width: 26px; padding: 0 5px; }
 button.slim image { -gtk-icon-size: 14px; }
 window.sidebar-hidden .status-bar { padding-left: 42px; }
-headerbar { box-shadow: inset 0 -1px alpha(@accent_bg_color, 0.35); }
+headerbar { box-shadow: inset 0 -1px alpha(@accent_bg_color, 0.35); min-height: 34px; }
 
 /* ---- window buttons: flat, full-height, flush with the corner (Fitts's law: slam the mouse into the corner) ---- */
-headerbar > windowhandle > box { padding-top: 0; padding-bottom: 0; padding-right: 0; }
+headerbar > windowhandle > box { padding-top: 0; padding-bottom: 0; padding-right: 0; min-height: 34px; }
 headerbar windowcontrols.end { margin-left: 6px; }
 headerbar windowcontrols button {
   margin: 0;
   padding: 0;
-  min-width: 46px;
-  min-height: 46px;
+  min-width: 40px;
+  min-height: 34px;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
@@ -141,8 +141,8 @@ headerbar windowcontrols button image {  /* the round bubble is drawn on the ico
   box-shadow: none;
   padding: 0;
   margin: 0;
-  min-width: 46px;
-  min-height: 40px;
+  min-width: 40px;
+  min-height: 34px;
 }
 headerbar windowcontrols button:hover { background-color: alpha(@accent_bg_color, 0.22); }
 headerbar windowcontrols button.close:hover { background-color: #c01c28; color: #fff; }
