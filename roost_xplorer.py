@@ -3364,8 +3364,8 @@ class Window(Adw.ApplicationWindow):
             p = GLib.get_user_special_dir(d)
             if p and p != home and os.path.isdir(p):
                 self._side_row(icon, label, 0, Gio.File.new_for_path(p), group="places")
+        self._side_row("user-trash-symbolic", "Trash", 0, Gio.File.new_for_uri("trash:///"), group="places")
         self._add_favorite_rows()
-        self._side_row("user-trash-symbolic", "Trash", 2, Gio.File.new_for_uri("trash:///"))
         self._group_row("Devices", "devices", 3)
         self._side_row("drive-harddisk-symbolic", "Computer", 3, Gio.File.new_for_path("/"), key="path:/", usage=True,
                        group="devices")
