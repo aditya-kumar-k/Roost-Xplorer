@@ -2601,6 +2601,8 @@ class Window(Adw.ApplicationWindow):
         self.translucent = bool(cfg.get("translucent", True))
         # On KDE the desktop draws the title bar and buttons with the user's Window Decoration theme; GTK's own
         # buttons are only used where that isn't offered (or if the desktop declines).
+        self._typing = False
+        self.connect("notify::focus-widget", self._on_focus_widget)
         self.ssd = WaylandBlur.get().can_decorate
         if self.ssd:
             self.set_decorated(False)
@@ -4057,6 +4059,29 @@ class Window(Adw.ApplicationWindow):
         self.acts["favorite-add"].set_enabled(not trash and any(not self.is_favorite(d) for d in dirs))
         self.acts["favorite-remove"].set_enabled(not trash and bool(dirs) and all(self.is_favorite(d) for d in dirs))
         self.acts["favorite-toggle-here"].set_enabled(tab.file.get_uri_scheme() == "file")
+        if self._typing:
+            self._release_text_keys()
+
+    # While you type in the address bar, search box or a dialog, keys like Backspace, Delete and Ctrl+V/C/X/A/Z
+    # belong to the text box, not to the folder (they are switched off as file actions meanwhile).
+    TEXT_ACTIONS = ("up", "cut", "copy", "paste", "trash", "delete-permanently", "select-all", "undo")
+
+    def _release_text_keys(self):
+        for name in self.TEXT_ACTIONS:
+            self.acts[name].set_enabled(False)
+
+    def _on_focus_widget(self, *a):
+        self._typing = isinstance(self.get_focus(), Gtk.Editable)
+        if not self.acts:
+            return
+        if self._typing:
+            self._release_text_keys()
+            return
+        self.update_actions()
+        tab = self.tab()
+        self.acts["select-all"].set_enabled(True)
+        self.acts["undo"].set_enabled(bool(self.undo_stack))
+        self.acts["up"].set_enabled(tab is not None and tab.file is not None and tab.file.get_parent() is not None)
 
     def toast(self, msg, undo=False):
         if self._last_toast is not None:
@@ -4272,8 +4297,30 @@ class Window(Adw.ApplicationWindow):
         try:
             files = cb.read_value_finish(res).get_files()
         except GLib.Error:
+            # no files on the clipboard: maybe it holds the paths of some, as text (a copied path, or a file list from a terminal)
+            cb.read_text_async(None, self._on_paste_text)
+            return
+        self._paste_files(files)
+
+    def _on_paste_text(self, cb, res):
+        try:
+            text = cb.read_text_finish(res) or ""
+        except GLib.Error:
+            text = ""
+        files = []
+        for line in text.splitlines():
+            line = line.strip().strip("'\"")
+            if line.startswith("file://"):
+                files.append(Gio.File.new_for_uri(line))
+            elif line.startswith("/"):
+                files.append(Gio.File.new_for_path(line))
+        files = [f for f in files if f.query_exists(None)]
+        if not files:
             self.toast("Nothing to paste")
             return
+        self._paste_files(files)
+
+    def _paste_files(self, files):
         move = bool(self.cut_files) and len(files) == len(self.cut_files) and all(
             a.equal(b) for a, b in zip(files, self.cut_files))
         if move:
