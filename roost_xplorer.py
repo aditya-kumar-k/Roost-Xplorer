@@ -2810,6 +2810,17 @@ class Window(Adw.ApplicationWindow):
         self.search_btn = Gtk.ToggleButton(icon_name="system-search-symbolic", tooltip_text="Search (Ctrl+F)",
                                            css_classes=["slim"])
         header.pack_end(self.search_btn)
+        # quick actions for the selected files, shown only while something is selected
+        self.sel_box = Gtk.Box(spacing=0, visible=False)
+        self.sel_buttons = []
+        for icon, action, tip in (("edit-copy-symbolic", "copy", "Copy (Ctrl+C)"),
+                                  ("edit-cut-symbolic", "cut", "Move: cut, then paste in the other folder (Ctrl+X)"),
+                                  ("document-properties-symbolic", "properties", "Properties"),
+                                  ("user-trash-symbolic", "trash", "Delete: move to Trash (Delete)")):
+            btn = Gtk.Button(icon_name=icon, action_name="win." + action, tooltip_text=tip, css_classes=["slim"])
+            self.sel_box.append(btn)
+            self.sel_buttons.append((btn, action))
+        header.pack_end(self.sel_box)
 
         # search bar
         self.search_entry = Gtk.SearchEntry(hexpand=True)
@@ -2965,6 +2976,7 @@ class Window(Adw.ApplicationWindow):
         add("toggle-hidden", lambda: self.lookup_action("show-hidden").activate(None))
         add("terminal", self.open_terminal)
         add("properties", self.properties)
+        add("localsend", self.send_localsend)
         add("empty-trash", self.empty_trash)
         add("restore", lambda: self.restore(self.tab().selected_infos()))
         add("restore-all", lambda: self.restore([self.tab().fmodel.get_item(i)
@@ -3015,6 +3027,7 @@ class Window(Adw.ApplicationWindow):
         preview = Gio.MenuItem.new("Preview", "win.preview")
         preview.set_attribute_value("accel", GLib.Variant("s", "space"))
         opens.append_item(preview)
+        opens.append_item(hidden_when_disabled("Send Files via LocalSend", "win.localsend"))
         opens.append_item(hidden_when_disabled("Set as Background", "win.set-wallpaper"))
         opens.append_item(hidden_when_disabled("Show in Folder", "win.show-in-folder"))
         opens.append_item(hidden_when_disabled("Open in Terminal", "win.terminal"))
@@ -4035,6 +4048,8 @@ class Window(Adw.ApplicationWindow):
         self.acts["show-in-folder"].set_enabled(tab.searching and n == 1)
         self.acts["open-tab"].set_enabled(any(is_dir(i) for i in infos))
         self.acts["open-with"].set_enabled(n == 1 and not is_dir(infos[0]))
+        self.acts["localsend"].set_enabled(
+            n > 0 and not trash and all(info_file(i).get_path() for i in infos) and self._localsend_app() is not None)
         self.acts["set-wallpaper"].set_enabled(
             n == 1 and not is_dir(infos[0]) and content_type(infos[0]).startswith("image/")
             and info_file(infos[0]).get_path() is not None and shutil.which("plasma-apply-wallpaperimage") is not None)
@@ -4059,6 +4074,9 @@ class Window(Adw.ApplicationWindow):
         self.acts["favorite-add"].set_enabled(not trash and any(not self.is_favorite(d) for d in dirs))
         self.acts["favorite-remove"].set_enabled(not trash and bool(dirs) and all(self.is_favorite(d) for d in dirs))
         self.acts["favorite-toggle-here"].set_enabled(tab.file.get_uri_scheme() == "file")
+        for btn, action in self.sel_buttons:  # the header's quick actions follow the selection
+            btn.set_visible(n > 0 and (action == "properties" or self.acts[action].get_enabled()))
+        self.sel_box.set_visible(n > 0)
         if self._typing:
             self._release_text_keys()
 
@@ -4276,6 +4294,30 @@ class Window(Adw.ApplicationWindow):
         for i in self.tab().selected_infos():
             if is_dir(i):
                 self.new_tab(info_file(i))
+
+    def _localsend_app(self):
+        """LocalSend's launcher, if it is installed (also as an AppImage with its own menu entry)."""
+        if not hasattr(self, "_localsend_info"):
+            info = None
+            for desktop_id in ("localsend.desktop", "org.localsend.localsend_app.desktop", "localsend_app.desktop"):
+                info = Gio.DesktopAppInfo.new(desktop_id)
+                if info is not None:
+                    break
+            if info is None:
+                info = next((a for a in Gio.AppInfo.get_all() if a.get_name().lower() == "localsend"), None)
+            self._localsend_info = info
+        return self._localsend_info
+
+    def send_localsend(self):
+        app = self._localsend_app()
+        files = [f for f in self.tab().selected_files() if f.get_path()]
+        if app is None or not files:
+            return
+        try:
+            app.launch(files, Gdk.Display.get_default().get_app_launch_context())
+            self.toast(f"Sending {len(files)} item{'s' if len(files) != 1 else ''} with LocalSend: pick the receiver")
+        except GLib.Error as e:
+            self.toast(f"Could not start LocalSend: {e.message}")
 
     def open_with(self):
         files = self.tab().selected_files()
