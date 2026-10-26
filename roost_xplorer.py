@@ -2815,6 +2815,7 @@ class Window(Adw.ApplicationWindow):
         self.sel_buttons = []
         for icon, action, tip in (("edit-copy-symbolic", "copy", "Copy (Ctrl+C)"),
                                   ("edit-cut-symbolic", "cut", "Move: cut, then paste in the other folder (Ctrl+X)"),
+                                  ("document-edit-symbolic", "rename", "Rename (F2)"),
                                   ("document-properties-symbolic", "properties", "Properties"),
                                   ("user-trash-symbolic", "trash", "Delete: move to Trash (Delete)")):
             btn = Gtk.Button(icon_name=icon, action_name="win." + action, tooltip_text=tip, css_classes=["slim"])
@@ -3037,8 +3038,11 @@ class Window(Adw.ApplicationWindow):
         archives.append("Compress…", "win.compress")
         archives.append_item(hidden_when_disabled("Extract Here", "win.extract"))
         item.append_section(None, archives)
-        item.append_section(None, section([("Rename…", "win.rename"), ("Move to Trash", "win.trash"),
-                                                   ("Delete Permanently…", "win.delete-permanently")]))
+        rename = Gio.Menu()
+        rename.append_item(hidden_when_disabled("Rename…", "win.rename"))  # only for a single selection
+        rename.append("Move to Trash", "win.trash")
+        rename.append("Delete Permanently…", "win.delete-permanently")
+        item.append_section(None, rename)
         panes = Gio.Menu()
         panes.append_item(hidden_when_disabled("Copy to Other Pane", "win.copy-other"))
         panes.append_item(hidden_when_disabled("Move to Other Pane", "win.move-other"))
