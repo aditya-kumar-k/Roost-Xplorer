@@ -172,6 +172,7 @@ Then delete the cloned folder if you like.
 | Right-click menu from the keyboard | <kbd>Menu</kbd> key, or <kbd>Shift</kbd>+<kbd>F10</kbd> |
 | Cut / copy / paste | <kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd> |
 | Rename | <kbd>F2</kbd> |
+| Properties | <kbd>Alt</kbd>+<kbd>Enter</kbd> |
 | Move to Trash | <kbd>Delete</kbd> |
 | Delete permanently (asks first) | <kbd>Shift</kbd>+<kbd>Delete</kbd> |
 | New folder / new file | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> / <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> |

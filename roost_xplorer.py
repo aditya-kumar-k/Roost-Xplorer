@@ -2976,7 +2976,7 @@ class Window(Adw.ApplicationWindow):
         add("show-in-folder", self.show_in_folder)
         add("toggle-hidden", lambda: self.lookup_action("show-hidden").activate(None))
         add("terminal", self.open_terminal)
-        add("properties", self.properties)
+        add("properties", self.properties, ["<Alt>Return", "<Alt>KP_Enter"])
         add("localsend", self.send_localsend)
         add("empty-trash", self.empty_trash)
         add("restore", lambda: self.restore(self.tab().selected_infos()))
@@ -4556,9 +4556,35 @@ class Window(Adw.ApplicationWindow):
                 mode = info.get_attribute_uint32("unix::mode") & 0o7777
                 bits = "".join(("r" if mode & (4 << sh) else "-") + ("w" if mode & (2 << sh) else "-") +
                                ("x" if mode & (1 << sh) else "-") for sh in (6, 3, 0))
-                row(group, "Permissions", f"{bits}  ({mode:04o})")
+                perm_row = row(group, "Permissions", f"{bits}  ({mode:04o})")
             row(group, "Owner", f"{info.get_attribute_string('owner::user') or '?'} : "
                                 f"{info.get_attribute_string('owner::group') or '?'}")
+            if (info.has_attribute("unix::mode") and info.get_file_type() == Gio.FileType.REGULAR
+                    and f.get_path() and info.get_attribute_string("owner::user") == GLib.get_user_name()):
+                exec_group = Adw.PreferencesGroup()
+                page.add(exec_group)
+                exec_row = Adw.SwitchRow(title="Make Executable",
+                                         subtitle="Allow running this file as a program",
+                                         active=bool(mode & 0o111))
+                exec_group.add(exec_row)
+
+                def toggle_exec(r, _pspec):
+                    try:
+                        cur = f.query_info("unix::mode", NOFOLLOW, None).get_attribute_uint32("unix::mode")
+                        new = (cur | 0o111) if r.get_active() else (cur & ~0o111)
+                        f.set_attribute_uint32("unix::mode", new & 0o7777, NOFOLLOW, None)
+                    except GLib.Error as e:
+                        self.toast(e.message)
+                        r.handler_block_by_func(toggle_exec)
+                        r.set_active(not r.get_active())
+                        r.handler_unblock_by_func(toggle_exec)
+                        return
+                    m = new & 0o7777
+                    b = "".join(("r" if m & (4 << sh) else "-") + ("w" if m & (2 << sh) else "-") +
+                                ("x" if m & (1 << sh) else "-") for sh in (6, 3, 0))
+                    perm_row.set_subtitle(f"{b}  ({m:04o})")
+
+                exec_row.connect("notify::active", toggle_exec)
         else:
             parents = {(x.get_parent().get_path() if x.get_parent() else "") for x in files}
             row(group, "Location", parents.pop() if len(parents) == 1 else "Multiple locations")
